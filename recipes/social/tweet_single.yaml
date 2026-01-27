@@ -1,0 +1,55 @@
+# 单条推文生成配方 (MVP)
+id: tweet_single
+name: 单条推文
+category: social
+tags: [twitter, short, quick]
+description: 根据想法或主题快速生成一条推文
+
+steps:
+  - id: "tweet_input"
+    type: text_input
+    label: "输入你的想法或主题"
+    config:
+      placeholder: ""
+      max_length: 1000
+      submit_label: "生成推文"
+      loading_label: "正在生成..."
+
+  - id: "ai_generate"
+    type: llm_generate
+    label: "AI 生成推文"
+    config:
+      output_format: "json"
+      temperature: 1.0
+      prompt_template: |
+        请根据以下内容生成 5 条不同版本的推文。
+
+        用户输入：{{ tweet_input.user_input }}
+
+        请严格以 JSON 数组格式输出，每个元素包含 "label"和 "content"两个字段。
+
+        要求：
+        1. 必须生成 5 个版本，且彼此之间在语气、句式和切入点上要有明显区别。
+        2. 不要使用#标签和emoji
+
+        输出示例：
+        [
+          { "label": "版本1", "content": "..." },
+          { "label": "版本2", "content": "..." },
+          { "label": "版本3", "content": "..." },
+          { "label": "版本4", "content": "..." },
+          { "label": "版本5", "content": "..." }
+        ]
+
+  - id: "select_version"
+    type: human_select
+    label: "选择或编辑"
+    config:
+      source_step: "ai_generate"
+      loading_label: "正在创作中..."
+
+  - id: "final_export"
+    type: export
+    label: "导出"
+    config:
+      source_step: "select_version"

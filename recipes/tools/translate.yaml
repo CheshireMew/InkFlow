@@ -1,0 +1,107 @@
+id: "translate_text"
+name: "智能多风格翻译"
+category: "tools"
+description: "将文本翻译为目标语言，同时提供直译、意译和本地化润色三种风格供选择。"
+tags: ["翻译", "多语言", "工具"]
+
+steps:
+  - id: "translate_input"
+    type: "text_input"
+    label: "配置翻译任务"
+    config:
+      submit_label: "开始翻译"
+      loading_label: "正在翻译中..."
+      fields:
+        - id: "original_text"
+          type: "textarea"
+          label: "待翻译文本"
+          placeholder: "在此粘贴需要翻译的内容..."
+          required: true
+
+        - id: "target_lang"
+          type: "select"
+          label: "目标语言"
+          options:
+            [
+              "英语 (English)",
+              "中文 (Chinese)",
+              "日语 (Japanese)",
+              "韩语 (Korean)",
+              "法语 (French)",
+              "德语 (German)",
+              "西班牙语 (Spanish)",
+            ]
+          default: "中文 (Chinese)"
+          required: true
+
+        - id: "translation_styles"
+          type: "multiselect"
+          label: "翻译风格偏好"
+          options: ["精准直译", "流畅意译", "地道润色"]
+          default: '["精准直译", "流畅意译", "地道润色"]'
+          required: true
+
+        - id: "llm_model"
+          type: "select"
+          label: "选择模型"
+          options:
+            [
+              "DeepSeek V3 (Fast)",
+              "DeepSeek R1 (Reasoning)",
+              "GPT-4o (Premium)",
+            ]
+          default: "DeepSeek V3 (Fast)"
+          required: false
+
+  - id: "ai_translate"
+    type: "llm_generate"
+    label: "AI 智能翻译"
+    config:
+      system_prompt: "你是一位精通多国语言的资深翻译专家。"
+      output_format: "json"
+      prompt_template: |
+        原文：
+        {{ translate_input.original_text }}
+
+        目标语言：{{ translate_input.target_lang }}
+
+        {% set styles = translate_input.translation_styles | default('[]') | from_json %}
+
+        请提供以下风格的翻译版本：
+        {% if "精准直译" in styles %}
+        - 【精准直译】：忠实于原文结构和字面意思，适合法律/技术文档。
+        {% endif %}
+        {% if "流畅意译" in styles or styles|length == 0 %}
+        - 【流畅意译】：调整语序和表达，使其在目标语言中更自然流畅，适合日常交流。
+        {% endif %}
+        {% if "地道润色" in styles %}
+        - 【地道润色（信达雅）】：使用目标语言的习语和文化梗，进行深度本地化，适合文学/营销内容。
+        {% endif %}
+
+        请严格以 JSON 数组格式输出版本，每个版本包含 label (风格名) 和 content (译文内容) 两个字段。
+        格式如下：
+        [
+          {% if "精准直译" in styles %}
+          { "label": "精准直译", "content": "译文内容..." },
+          {% endif %}
+          {% if "流畅意译" in styles or styles|length == 0 %}
+          { "label": "流畅意译", "content": "译文内容..." },
+          {% endif %}
+          {% if "地道润色" in styles %}
+          { "label": "地道润色", "content": "译文内容..." }
+          {% endif %}
+        ]
+
+  - id: "select_version"
+    type: "human_select"
+    label: "选择最佳版本"
+    config:
+      source_step: "ai_translate"
+      loading_label: "正在翻译中..."
+
+  - id: "final_export"
+    type: "export"
+    label: "导出结果"
+    config:
+      source_step: "select_version"
+      format: "text"
