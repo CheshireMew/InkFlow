@@ -8,6 +8,8 @@
 - **StepRegistry** - Auto-discovery and registration
 - **StepContext** - Context passed between steps
 - **StepResult** - Execution result with review flag
+- **Workflow Contract** - Backend-normalized step runtime/stage/source metadata
+- **Writing Contract** - Unified LLM generation rules, review, and cleanup
 
 ### 1.2 Recipe System
 
@@ -28,8 +30,7 @@
 | ------------ | ------------- | --------------------- |
 | text_input   | steps/input/  | User text input       |
 | llm_generate | steps/llm/    | AI content generation |
-| human_select | steps/output/ | User selection UI     |
-| export       | steps/output/ | Content export        |
+| human_select | frontend      | User selection UI     |
 
 ---
 
@@ -50,9 +51,7 @@
 GET  /health                  - Health check
 GET  /api/recipes             - List recipes
 GET  /api/recipes/{id}        - Get recipe
-POST /api/pipelines/create    - Create pipeline
-GET  /api/pipelines/{id}      - Get status
-POST /api/pipelines/execute   - Execute step
+POST /api/actions/run         - Execute server-side step
 ```
 
 ---

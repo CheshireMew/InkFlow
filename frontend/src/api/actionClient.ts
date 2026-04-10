@@ -1,40 +1,34 @@
-import { API_BASE } from "../config";
-
-export interface ActionResponse {
+export interface ActionResult {
   success: boolean;
-  data: any;
+  data: unknown;
   error?: string;
+  meta?: unknown;
 }
 
-export const executeAction = async (
+export async function executeAction(
   tool: string,
-  inputs: any,
-  config: any = {},
-): Promise<ActionResponse> => {
+  inputs: Record<string, unknown>,
+  config: Record<string, unknown>,
+): Promise<ActionResult> {
   try {
-    const response = await fetch(`${API_BASE}/actions/run`, {
+    const res = await fetch("/api/actions/run", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        tool,
-        inputs,
-        config,
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool, inputs, config }),
     });
 
-    if (!response.ok) {
-      const err = await response.json();
-      return {
-        success: false,
-        data: null,
-        error: err.detail || "Request failed",
-      };
+    if (!res.ok) {
+      throw new Error(`API Error: ${res.statusText}`);
     }
 
-    return await response.json();
-  } catch (err) {
-    return { success: false, data: null, error: String(err) };
+    return await res.json();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("Action Execution Failed:", err);
+    return {
+      success: false,
+      data: null,
+      error: message,
+    };
   }
-};
+}

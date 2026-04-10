@@ -19,14 +19,8 @@ steps:
     type: llm_generate
     label: "AI 生成推文"
     config:
-      system_prompt: "你是一位擅长中文短文本创作的内容作者。"
       output_format: "json"
       temperature: 1.0
-      writing_contract:
-        style_rules:
-          - "每条都要像真人会发出去的话，不要写成宣传文案。"
-          - "允许有锋利感，但不要浮夸，不要空喊观点。"
-          - "五个版本的切入点必须明显不同。"
       prompt_template: |
         请根据以下内容生成 5 条不同版本的推文。
 
@@ -53,3 +47,9 @@ steps:
     config:
       source_step: "ai_generate"
       loading_label: "正在创作中..."
+
+  - id: "final_export"
+    type: export
+    label: "导出"
+    config:
+      source_step: "select_version"

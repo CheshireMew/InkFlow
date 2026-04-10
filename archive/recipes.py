@@ -7,8 +7,7 @@ API endpoints for recipe management.
 from fastapi import APIRouter, HTTPException
 from typing import List
 
-from recipes.contracts import normalize_recipe
-from recipes.loader import get_recipe_loader
+from recipes.loader import get_recipe_loader, Recipe
 from core.exceptions import RecipeNotFoundError
 
 router = APIRouter()
@@ -45,6 +44,20 @@ async def get_recipe(recipe_id: str):
     loader = get_recipe_loader()
     try:
         recipe = loader.get(recipe_id)
-        return normalize_recipe(recipe).model_dump()
+        return {
+            "id": recipe.id,
+            "name": recipe.name,
+            "category": recipe.category,
+            "tags": recipe.tags,
+            "description": recipe.description,
+            "steps": [
+                {
+                    "type": s.type,
+                    "label": s.label,
+                    "config": s.config
+                }
+                for s in recipe.steps
+            ]
+        }
     except RecipeNotFoundError:
         raise HTTPException(status_code=404, detail=f"Recipe '{recipe_id}' not found")

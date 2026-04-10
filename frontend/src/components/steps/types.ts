@@ -1,3 +1,8 @@
+export interface VariantOption {
+  label?: string;
+  content: string;
+}
+
 export interface FieldConfig {
   id: string;
   type: "text" | "textarea" | "select" | "multiselect";
@@ -10,31 +15,36 @@ export interface FieldConfig {
 
 export interface StepResult {
   text?: string;
-  selected?: string;
-  variants?: string[];
+  user_input?: string;
+  selected?: string | VariantOption[];
+  selected_indices?: number[];
+  variants?: Array<string | VariantOption>;
   content?: string;
   awaiting_selection?: boolean;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface Step {
   index: number;
-  id?: string;
+  id: string;
   type: string;
   label: string;
+  run_mode: "client" | "server";
+  stage: "input" | "generate" | "review";
+  auto_run: boolean;
+  source_step?: string | null;
   status: "pending" | "running" | "completed" | "failed";
   result?: StepResult;
   config?: {
     fields?: FieldConfig[];
     submit_label?: string;
-    variants?: string[]; // For human_select injected variants
-    [key: string]: any;
+    [key: string]: unknown;
   };
 }
 
 export interface StepComponentProps {
   step: Step;
-  onExecute: (inputs: Record<string, any>) => void;
+  onExecute: (inputs: Record<string, unknown>) => void;
   executing: boolean;
   isPipelineRunning?: boolean;
 }

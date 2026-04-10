@@ -2,6 +2,11 @@
 
 AI-powered writing workflow engine.
 
+Current architecture:
+- Recipes describe a stateless workflow contract.
+- Frontend owns step state and local review.
+- Backend executes server-side steps and applies a unified writing contract for LLM generation.
+
 ## Quick Start
 
 ```bash
@@ -25,8 +30,7 @@ cd frontend; npm run dev
 - `GET /health` - Health check
 - `GET /api/recipes` - List recipes
 - `GET /api/recipes/{id}` - Get recipe details
-- `POST /api/pipelines/create` - Create pipeline
-- `POST /api/pipelines/execute` - Execute step
+- `POST /api/actions/run` - Execute a single server-side step
 
 ## Project Structure
 
@@ -37,10 +41,11 @@ InkFlow/
 │   ├── steps/            # Step implementations
 │   ├── recipes/          # Recipe loader
 │   ├── services/         # LLM, HTTP, etc.
+│   ├── core/            # Workflow and writing contracts
 │   └── routers/          # API routes
 ├── recipes/              # YAML recipes
 │   ├── social/           # Twitter, etc.
 │   ├── marketing/        # Ads, copy
 │   └── learning/         # Tutorials
-└── frontend/             # React app (WIP)
+└── frontend/             # React app
 ```

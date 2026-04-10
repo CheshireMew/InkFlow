@@ -1,9 +1,9 @@
 """
-InkFlow Steps Package
+InkFlow Tools Package
 """
 
 from .base import BaseStep, StepConfig, StepContext, StepResult
-from .registry import register_step, get_step_class, create_step, list_step_types, discover_steps
+from .registry import register_step, get_step_class, create_step, list_step_types, discover_steps as discover_tools
 
 __all__ = [
     "BaseStep",
@@ -14,5 +14,6 @@ __all__ = [
     "get_step_class",
     "create_step",
     "list_step_types",
-    "discover_steps"
+    "discover_tools"
 ]
+

@@ -1,4 +1,4 @@
-import { Twitter, Megaphone, BookOpen, FileText, Pencil, Languages } from 'lucide-react'
+import { Twitter, Megaphone, BookOpen, FileText, Pencil, Languages, Sparkles } from 'lucide-react'
 
 interface Recipe {
   id: string
@@ -12,6 +12,7 @@ interface Recipe {
 interface RecipeListProps {
   recipes: Recipe[]
   onSelect: (recipeId: string) => void
+  onToolbox?: () => void
 }
 
 const categoryIcons: Record<string, React.ReactNode> = {
@@ -32,7 +33,7 @@ const categoryLabels: Record<string, string> = {
   other: '其他'
 }
 
-export default function RecipeList({ recipes, onSelect }: RecipeListProps) {
+export default function RecipeList({ recipes, onSelect, onToolbox }: RecipeListProps) {
   // Group by category
   const grouped = recipes.reduce((acc, recipe) => {
     const cat = recipe.category || 'other'
@@ -62,6 +63,34 @@ export default function RecipeList({ recipes, onSelect }: RecipeListProps) {
           让 AI 成为你的灵感催化剂，从这里开始你的创作之旅
         </p>
       </div>
+
+      {/* Toolbox Card - Special Entry */}
+      {onToolbox && (
+        <div className="mb-8">
+          <button
+            onClick={onToolbox}
+            className="w-full glass-panel text-left p-6 rounded-2xl group transition-all duration-300 hover:scale-[1.01] hover:bg-gradient-to-r hover:from-indigo-500/10 hover:to-purple-500/10 relative overflow-hidden border-2 border-dashed border-indigo-500/30 hover:border-indigo-500/60"
+          >
+            <div className="absolute inset-0 bg-gradient-to-r from-indigo-500/5 to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+            <div className="relative z-10 flex items-center gap-4">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                <Sparkles className="w-6 h-6 text-white" />
+              </div>
+              <div className="flex-1">
+                <h4 className="text-lg font-semibold text-white group-hover:text-indigo-400 transition-colors flex items-center gap-2">
+                  🧪 自由组合工坊
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-[10px] font-medium text-indigo-400 border border-indigo-500/30">
+                    NEW
+                  </span>
+                </h4>
+                <p className="text-sm text-[var(--text-muted)] mt-1">
+                  随心所欲地组合工具：输入 → 生成 → 翻译 → 扩写，打造你自己的工作流
+                </p>
+              </div>
+            </div>
+          </button>
+        </div>
+      )}
 
       {Object.entries(grouped).map(([category, categoryRecipes]) => (
         <div key={category} className="animate-float" style={{ animationDuration: '0s' }}>

@@ -1,5 +1,5 @@
 """InkFlow Routers Package"""
 
-from . import recipes, pipelines
+from . import recipes, actions
 
-__all__ = ["recipes", "pipelines"]
+__all__ = ["recipes", "actions"]

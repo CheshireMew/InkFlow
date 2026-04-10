@@ -15,7 +15,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from steps import discover_steps
+from steps import discover_tools
 from recipes.loader import init_recipe_loader
 from services.http_client import close_http_client
 
@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting InkFlow Backend...")
     
     # Discover and register all steps
-    discover_steps()
+    discover_tools()
     
     # Load recipes
     recipes_dir = Path(__file__).parent.parent / "recipes"
@@ -75,10 +75,9 @@ async def health_check():
 
 
 # Import and include routers
-from routers import recipes, pipelines, actions
+from routers import recipes, actions
 
 app.include_router(recipes.router, prefix="/api/recipes", tags=["recipes"])
-app.include_router(pipelines.router, prefix="/api/pipelines", tags=["pipelines"])
 app.include_router(actions.router, prefix="/api/actions", tags=["actions"])
 
 

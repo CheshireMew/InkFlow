@@ -1,7 +1,7 @@
 """
-InkFlow Step Registry
+InkFlow Tool Registry
 
-Auto-discovers and registers all step types from the steps/ directory.
+Auto-discovers and registers all tool types from the tools/ directory.
 """
 
 import importlib
@@ -12,7 +12,7 @@ from typing import Dict, Type
 
 from .base import BaseStep, StepConfig
 
-logger = logging.getLogger("StepRegistry")
+logger = logging.getLogger("ToolRegistry")
 
 # Global registry: step_type -> step_class
 _registry: Dict[str, Type[BaseStep]] = {}
@@ -32,7 +32,7 @@ def register_step(step_class: Type[BaseStep]) -> Type[BaseStep]:
         raise ValueError(f"Step class {step_class.__name__} must define step_type")
     
     _registry[step_class.step_type] = step_class
-    logger.debug(f"📦 Registered step: {step_class.step_type}")
+    logger.debug(f"📦 Registered tool: {step_class.step_type}")
     return step_class
 
 
@@ -40,7 +40,7 @@ def get_step_class(step_type: str) -> Type[BaseStep]:
     """Get a registered step class by type."""
     if step_type not in _registry:
         from core.exceptions import StepNotFoundError
-        raise StepNotFoundError(f"Step type '{step_type}' not registered", step_id=step_type)
+        raise StepNotFoundError(f"Tool type '{step_type}' not registered", step_id=step_type)
     return _registry[step_type]
 
 
@@ -51,40 +51,30 @@ def create_step(config: StepConfig) -> BaseStep:
 
 
 def list_step_types() -> list:
-    """List all registered step types."""
+    """List all registered tool types."""
     return list(_registry.keys())
 
 
 def discover_steps():
     """
-    Auto-discover all step modules in steps/{category}/ directories.
+    Auto-discover all tool modules in the flat tools/ directory.
     
     This function should be called once at startup.
     """
-    steps_dir = Path(__file__).parent
+    tools_dir = Path(__file__).parent
     
-    # Categories to scan
-    categories = ["input", "llm", "output"]
-    
-    for category in categories:
-        category_dir = steps_dir / category
-        if not category_dir.exists():
+    # Scan all .py files in tools/ (flat structure)
+    for module_file in tools_dir.glob("*.py"):
+        # Skip __init__, base, registry
+        if module_file.name.startswith("_") or module_file.stem in ["base", "registry"]:
             continue
         
-        # Import each module in the category
-        for module_file in category_dir.glob("*.py"):
-            if module_file.name.startswith("_"):
-                continue
-            
-            module_name = f"steps.{category}.{module_file.stem}"
-            try:
-                importlib.import_module(module_name)
-                logger.debug(f"📂 Loaded step module: {module_name}")
-            except Exception as e:
-                logger.error(f"❌ Failed to load {module_name}: {e}")
+        module_name = f"steps.{module_file.stem}"
+        try:
+            importlib.import_module(module_name)
+            logger.debug(f"📂 Loaded tool module: {module_name}")
+        except Exception as e:
+            logger.error(f"❌ Failed to load {module_name}: {e}")
     
-    logger.info(f"✅ Step registry: {len(_registry)} types registered")
+    logger.info(f"✅ Tool registry: {len(_registry)} types registered")
 
-
-# Auto-discover on import
-# discover_steps()  # Comment out for now, call explicitly at startup

@@ -59,11 +59,6 @@ steps:
     config:
       system_prompt: "你是一位精通多国语言的资深翻译专家。"
       output_format: "json"
-      writing_contract:
-        inherit_default_banned_phrases: false
-        style_rules:
-          - "优先保证信息准确，不要为了风格牺牲原意。"
-          - "译文要自然，但不要擅自补充原文没有的信息。"
       prompt_template: |
         原文：
         {{ translate_input.original_text }}
@@ -103,3 +98,10 @@ steps:
     config:
       source_step: "ai_translate"
       loading_label: "正在翻译中..."
+
+  - id: "final_export"
+    type: "export"
+    label: "导出结果"
+    config:
+      source_step: "select_version"
+      format: "text"

@@ -6,22 +6,22 @@ All step types must inherit from this base class.
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class StepConfig(BaseModel):
     """Configuration for a step instance."""
     type: str
     label: str = ""
-    config: Dict[str, Any] = {}
+    config: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StepContext(BaseModel):
     """Context passed between steps in a pipeline."""
     pipeline_id: str
     user_id: str
-    inputs: Dict[str, Any] = {}
-    outputs: Dict[str, Any] = {}
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    outputs: Dict[str, Any] = Field(default_factory=dict)
     
     def get_previous_output(self, step_id: str) -> Optional[Any]:
         """Get output from a previous step."""

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from core.exceptions import RecipeNotFoundError, RecipeValidationError
 
 logger = logging.getLogger("RecipeLoader")
@@ -20,7 +20,7 @@ class RecipeStep(BaseModel):
     id: Optional[str] = None
     type: str
     label: str = ""
-    config: dict = {}
+    config: dict = Field(default_factory=dict)
 
 
 class Recipe(BaseModel):
@@ -28,7 +28,7 @@ class Recipe(BaseModel):
     id: str
     name: str
     category: str = "other"
-    tags: List[str] = []
+    tags: List[str] = Field(default_factory=list)
     steps: List[RecipeStep]
     description: str = ""
 

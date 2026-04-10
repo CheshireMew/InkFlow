@@ -31,18 +31,15 @@ export default function LLMGenerateStep({ step, onExecute, executing }: StepComp
         {executing ? (
         <>
             <Loader2 className="w-5 h-5 animate-spin" />
-            AI 正在深度思考...
+            正在生成...
         </>
         ) : (
         <>
             <Bot className="w-5 h-5" />
-            启动 AI 生成引擎
+            开始生成
         </>
         )}
     </button>
-    <p className="text-center text-xs text-[var(--text-dim)] mt-3">
-        DeepSeek V3 模型已就绪 · 预计耗时 5-10 秒
-    </p>
     </div>
   )
 }

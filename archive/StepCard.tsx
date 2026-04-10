@@ -1,8 +1,13 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, Clock, Loader2, X, ChevronDown } from 'lucide-react'
 import type { Step } from './steps/types'
-import { renderStep } from '../workflow/stepRegistry'
+
+// Step Components
+import TextInputStep from './steps/TextInputStep'
+import LLMGenerateStep from './steps/LLMGenerateStep'
+import HumanSelectStep from './steps/HumanSelectStep'
+import ExportStep from './steps/ExportStep'
 
 // Re-export type for compatibility with Pipeline.tsx
 export type { Step } from './steps/types'
@@ -11,15 +16,19 @@ interface StepCardProps {
   step: Step
   isActive: boolean
   isCompleted: boolean
-  onExecute: (inputs: Record<string, unknown>) => void
+  onExecute: (inputs: Record<string, any>) => void
   executing: boolean
   isPipelineRunning?: boolean
   defaultExpanded?: boolean
 }
 
 export default function StepCard({ step, isActive, isCompleted, onExecute, executing, isPipelineRunning, defaultExpanded = false }: StepCardProps) {
-  const [isManuallyExpanded, setIsManuallyExpanded] = useState(defaultExpanded)
-  const isExpanded = isActive || isManuallyExpanded
+  const [isExpanded, setIsExpanded] = useState(isActive || defaultExpanded)
+  
+  // Auto-expand when active
+  useEffect(() => {
+    if (isActive) setIsExpanded(true)
+  }, [isActive])
 
   const statusIcons = {
     pending: <Clock className="w-5 h-5 text-[var(--text-muted)]" />,
@@ -41,14 +50,21 @@ export default function StepCard({ step, isActive, isCompleted, onExecute, execu
         isPipelineRunning
     }
 
-    try {
-      return renderStep(step, props)
-    } catch {
-      return (
-          <div className="p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] text-[var(--error)]">
-              Unknown Step Type: {step.type}
-          </div>
-      )
+    switch (step.type) {
+      case 'text_input':
+        return <TextInputStep {...props} />
+      case 'llm_generate':
+        return <LLMGenerateStep {...props} />
+      case 'human_select':
+        return <HumanSelectStep {...props} />
+      case 'export':
+        return <ExportStep {...props} />
+      default:
+        return (
+            <div className="p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] text-[var(--error)]">
+                Unknown Step Type: {step.type}
+            </div>
+        )
     }
   }
 
@@ -77,7 +93,7 @@ export default function StepCard({ step, isActive, isCompleted, onExecute, execu
       {/* Header */}
       <div 
         className={headerClass}
-        onClick={() => setIsManuallyExpanded(!isExpanded)}
+        onClick={() => setIsExpanded(!isExpanded)}
       >
         <div className="flex items-center gap-4">
           <div className="flex items-center justify-center w-8 h-8 rounded-full bg-black/20 border border-[var(--border-subtle)]">
