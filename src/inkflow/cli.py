@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import sys
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from inkflow.domain import ExecutorKind, HandoffCore, ReferenceKind
+from inkflow.domain import ExecutorKind, HandoffCore, PromptStage, ReferenceKind
 from inkflow.paths import AppPaths
+from inkflow.resources import frontend_dist
+from inkflow.serialization import row_dict
 from inkflow.service import InkFlowService
 from inkflow.storage import Database
 
@@ -18,23 +21,28 @@ project_app = typer.Typer(help="写作项目")
 reference_app = typer.Typer(help="参考案例与钩子")
 prepare_app = typer.Typer(help="写作准备")
 job_app = typer.Typer(help="外部执行任务")
-handoff_app = typer.Typer(help="两轮写作交接")
+handoff_app = typer.Typer(help="写作交接")
 rule_app = typer.Typer(help="写作规则")
-generate_app = typer.Typer(help="成品生成")
-experiment_app = typer.Typer(help="提示词对比实验")
+prompt_app = typer.Typer(help="各环节提示词版本")
+generate_app = typer.Typer(help="单篇生成")
+experiment_app = typer.Typer(help="批量与规则对比实验")
 result_app = typer.Typer(help="生成结果")
-provider_app = typer.Typer(help="API 提供方")
+provider_app = typer.Typer(help="模型 API 提供方")
 
-app.add_typer(project_app, name="project")
-app.add_typer(reference_app, name="reference")
-app.add_typer(prepare_app, name="prepare")
-app.add_typer(job_app, name="job")
-app.add_typer(handoff_app, name="handoff")
-app.add_typer(rule_app, name="rule")
-app.add_typer(generate_app, name="generate")
-app.add_typer(experiment_app, name="experiment")
-app.add_typer(result_app, name="result")
-app.add_typer(provider_app, name="provider")
+for name, group in {
+    "project": project_app,
+    "reference": reference_app,
+    "prepare": prepare_app,
+    "job": job_app,
+    "handoff": handoff_app,
+    "rule": rule_app,
+    "prompt": prompt_app,
+    "generate": generate_app,
+    "experiment": experiment_app,
+    "result": result_app,
+    "provider": provider_app,
+}.items():
+    app.add_typer(group, name=name)
 
 
 @app.callback()
@@ -48,24 +56,16 @@ def configure(
 
 @app.command()
 def doctor(ctx: typer.Context) -> None:
-    paths: AppPaths = ctx.obj["paths"]
-    service = _service(ctx)
-    _emit(
-        {
-            "ok": True,
-            "database": str(paths.database_path),
-            "projects": len(service.repository.list_projects()),
-            "references": len(service.repository.list_references()),
-            "rules": len(service.repository.list_rules()),
-        }
-    )
+    diagnostics = _service(ctx).doctor()
+    diagnostics["frontend_assets"] = frontend_dist().is_dir()
+    _emit(diagnostics)
 
 
 @app.command("app")
 def app_server(
     ctx: typer.Context,
     host: str = typer.Option("127.0.0.1", "--host"),
-    port: int = typer.Option(8765, "--port"),
+    port: int = typer.Option(0, "--port", min=0, max=65535),
     open_browser: bool = typer.Option(True, "--open/--no-open"),
 ) -> None:
     import threading
@@ -76,9 +76,12 @@ def app_server(
     from inkflow.api import create_app
 
     paths: AppPaths = ctx.obj["paths"]
+    actual_port = port or _available_port(host)
+    url = f"http://{host}:{actual_port}"
+    typer.echo(json.dumps({"url": url}, ensure_ascii=False), err=True)
     if open_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://{host}:{port}")).start()
-    uvicorn.run(create_app(paths.data_dir), host=host, port=port)
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    uvicorn.run(create_app(paths.data_dir), host=host, port=actual_port)
 
 
 @project_app.command("create")
@@ -91,7 +94,7 @@ def project_create(
     material_file: list[Path] | None = typer.Option(None, "--material-file"),
 ) -> None:
     user_request = _text_argument(request, request_file, "request")
-    materials: list[tuple[str, str]] = [("", item) for item in (material or []) if item.strip()]
+    materials: list[tuple[str, str]] = [("", item) for item in material or []]
     for path in material_file or []:
         materials.append((path.name, path.read_text(encoding="utf-8-sig")))
     project_id = _service(ctx).create_project(
@@ -102,23 +105,30 @@ def project_create(
 
 @project_app.command("list")
 def project_list(ctx: typer.Context) -> None:
-    _emit([_row(row) for row in _service(ctx).repository.list_projects()])
+    _emit([row_dict(row) for row in _service(ctx).projects.list()])
 
 
 @project_app.command("show")
 def project_show(ctx: typer.Context, project_id: str) -> None:
     service = _service(ctx)
+    jobs = service.workflows.list_jobs(project_id)
     _emit(
         {
-            "project": _row(service.repository.get_project(project_id)),
-            "sources": [
-                _row(row, omit={"content"}) for row in service.repository.list_sources(project_id)
-            ],
+            "project": row_dict(service.projects.get(project_id)),
+            "sources": [row_dict(row) for row in service.projects.list_sources(project_id)],
             "jobs": [
-                _row(row, omit={"payload_json", "result_json", "lease_token"})
-                for row in service.repository.list_jobs(project_id)
+                {
+                    **row_dict(row),
+                    "attempts": [
+                        row_dict(attempt, omit={"lease_token"})
+                        for attempt in service.workflows.list_attempts(row.id)
+                    ],
+                }
+                for row in jobs
             ],
-            "experiments": [_row(row) for row in service.repository.list_experiments(project_id)],
+            "experiments": [
+                row_dict(row) for row in service.workflows.list_experiments(project_id)
+            ],
         }
     )
 
@@ -129,14 +139,20 @@ def project_add_source(
     project_id: str,
     text: str | None = typer.Option(None, "--text"),
     file: Path | None = typer.Option(None, "--file"),
+    url: str | None = typer.Option(None, "--url"),
 ) -> None:
-    content = _text_argument(text, file, "source")
-    source_id = _service(ctx).add_source(
-        project_id,
-        content=content,
-        kind="file" if file else "pasted",
-        provenance={"source_name": file.name} if file else {},
-    )
+    if url:
+        if text is not None or file is not None:
+            raise typer.BadParameter("URL、文本和文件只能选择一种")
+        source_id = _service(ctx).add_url_source(project_id, url)
+    else:
+        content = _text_argument(text, file, "source")
+        source_id = _service(ctx).add_source(
+            project_id,
+            content=content,
+            kind="file" if file else "pasted",
+            provenance={"source_name": file.name} if file else {},
+        )
     _emit({"source_id": source_id})
 
 
@@ -149,9 +165,15 @@ def reference_import_100x(ctx: typer.Context, library_root: Path) -> None:
 def reference_list(
     ctx: typer.Context,
     kind: ReferenceKind | None = typer.Option(None, "--kind"),
+    include_inactive: bool = typer.Option(False, "--include-inactive"),
 ) -> None:
-    rows = _service(ctx).repository.list_references(kind=kind)
-    _emit([_row(row, omit={"body", "metadata_json"}) for row in rows])
+    rows = _service(ctx).library.list_references(kind=kind, include_inactive=include_inactive)
+    _emit([{**row_dict(row, omit={"body"}), "body_preview": row.body[:180]} for row in rows])
+
+
+@reference_app.command("get")
+def reference_get(ctx: typer.Context, reference_id: str) -> None:
+    _emit(row_dict(_service(ctx).library.get_reference(reference_id)))
 
 
 @prepare_app.command("start")
@@ -159,10 +181,19 @@ def prepare_start(
     ctx: typer.Context,
     project_id: str,
     executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
+    prepare_prompt_id: str | None = typer.Option(None, "--prepare-prompt"),
+    reference_prompt_id: str | None = typer.Option(None, "--reference-prompt"),
+    provider_profile_id: str | None = typer.Option(None, "--provider"),
     run: bool = typer.Option(False, "--run"),
 ) -> None:
     service = _service(ctx)
-    job_id = service.start_preparation(project_id, executor=executor)
+    job_id = service.start_preparation(
+        project_id,
+        executor=executor,
+        prepare_prompt_id=prepare_prompt_id,
+        reference_prompt_id=reference_prompt_id,
+        provider_profile_id=provider_profile_id,
+    )
     if run:
         if executor is not ExecutorKind.API:
             raise typer.BadParameter("--run 仅适用于 API 执行器")
@@ -171,7 +202,12 @@ def prepare_start(
 
 
 @job_app.command("next")
-def job_next(ctx: typer.Context, project_id: str | None = typer.Option(None, "--project")) -> None:
+def job_next(
+    ctx: typer.Context,
+    project_id: str | None = typer.Option(None, "--project"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    del json_output
     envelope = _service(ctx).lease_external_job(project_id)
     _emit(envelope.model_dump(mode="json") if envelope else None)
 
@@ -180,76 +216,62 @@ def job_next(ctx: typer.Context, project_id: str | None = typer.Option(None, "--
 def job_submit(
     ctx: typer.Context,
     job_id: str,
+    attempt_id: str = typer.Option(..., "--attempt-id"),
     lease_token: str = typer.Option(..., "--lease-token"),
     result: str | None = typer.Option(None, "--result"),
     result_file: Path | None = typer.Option(None, "--result-file"),
 ) -> None:
     raw = _text_argument(result, result_file, "result")
-    parsed = json.loads(raw)
-    if not isinstance(parsed, dict):
-        raise typer.BadParameter("result 必须是 JSON 对象")
-    _service(ctx).submit_job(job_id, lease_token=lease_token, result=parsed)
-    _emit({"job_id": job_id, "status": "succeeded"})
+    _service(ctx).submit_job_result(
+        job_id,
+        attempt_id=attempt_id,
+        lease_token=lease_token,
+        raw_response=raw,
+    )
+    _emit({"job_id": job_id, "attempt_id": attempt_id, "status": "succeeded"})
 
 
 @job_app.command("retry")
 def job_retry(ctx: typer.Context, job_id: str) -> None:
-    row = _service(ctx).repository.fail_job(job_id, error="", retry=True)
-    _emit(_row(row, omit={"payload_json", "result_json", "lease_token"}))
+    _service(ctx).retry_job(job_id)
+    _emit({"job_id": job_id, "status": "pending"})
 
 
 @handoff_app.command("show")
-def handoff_show(ctx: typer.Context, project_id: str) -> None:
+def handoff_show(
+    ctx: typer.Context,
+    project_id: str,
+    markdown: bool = typer.Option(False, "--markdown"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    if markdown and json_output:
+        raise typer.BadParameter("--markdown 与 --json 不能同时使用")
     service = _service(ctx)
-    row = service.repository.get_handoff(project_id)
+    if markdown:
+        typer.echo(service.render_handoff(project_id))
+        return
+    row = service.workflows.get_handoff(project_id)
     _emit(
         {
-            "handoff": _row(row, omit={"reference_cases_json", "reference_hooks_json"}),
-            "core": service.repository.handoff_core(row).model_dump(),
+            "handoff": row_dict(row, omit={"reference_cases_json", "reference_hooks_json"}),
+            "core": service.workflows.handoff_core(row).model_dump(),
         }
     )
 
 
 @handoff_app.command("approve")
 def handoff_approve(ctx: typer.Context, project_id: str) -> None:
-    _emit(_row(_service(ctx).approve_handoff(project_id)))
+    _emit(row_dict(_service(ctx).approve_handoff(project_id)))
 
 
 @handoff_app.command("revise")
 def handoff_revise(
     ctx: typer.Context,
     project_id: str,
-    material_file: Path = typer.Option(..., "--material-file"),
-    other_inputs_file: Path | None = typer.Option(None, "--other-inputs-file"),
+    file: Path = typer.Option(..., "--file"),
 ) -> None:
-    service = _service(ctx)
-    project = service.repository.get_project(project_id)
-    latest = service.repository.get_handoff(project_id)
-    current = service.repository.handoff_core(latest)
-    row = service.revise_handoff(
-        project_id,
-        HandoffCore(
-            user_request=project.user_request,
-            purified_material=material_file.read_text(encoding="utf-8-sig"),
-            reference_cases=current.reference_cases,
-            reference_hooks=current.reference_hooks,
-            other_inputs=(
-                other_inputs_file.read_text(encoding="utf-8-sig")
-                if other_inputs_file
-                else current.other_inputs
-            ),
-        ),
-    )
-    _emit(_row(row))
-
-
-@handoff_app.command("render")
-def handoff_render(
-    ctx: typer.Context,
-    project_id: str,
-    rule_id: str | None = typer.Option(None, "--rule"),
-) -> None:
-    typer.echo(_service(ctx).render_handoff(project_id, rule_id=rule_id))
+    core = HandoffCore.model_validate_json(file.read_text(encoding="utf-8-sig"))
+    _emit(row_dict(_service(ctx).revise_handoff(project_id, core)))
 
 
 @rule_app.command("add")
@@ -261,7 +283,7 @@ def rule_add(
     activate: bool = typer.Option(False, "--activate"),
 ) -> None:
     _emit(
-        _row(
+        row_dict(
             _service(ctx).add_rule(
                 name=name, body=_text_argument(text, file, "rule"), activate=activate
             )
@@ -271,12 +293,47 @@ def rule_add(
 
 @rule_app.command("list")
 def rule_list(ctx: typer.Context) -> None:
-    _emit([_row(row) for row in _service(ctx).repository.list_rules()])
+    _emit([row_dict(row) for row in _service(ctx).library.list_rules()])
 
 
 @rule_app.command("activate")
 def rule_activate(ctx: typer.Context, rule_id: str) -> None:
-    _emit(_row(_service(ctx).activate_rule(rule_id)))
+    _emit(row_dict(_service(ctx).activate_rule(rule_id)))
+
+
+@prompt_app.command("list")
+def prompt_list(
+    ctx: typer.Context,
+    stage: PromptStage | None = typer.Option(None, "--stage"),
+) -> None:
+    service = _service(ctx)
+    _emit([_prompt_view(service, row) for row in service.prompts.list(stage)])
+
+
+@prompt_app.command("add")
+def prompt_add(
+    ctx: typer.Context,
+    stage: PromptStage = typer.Option(..., "--stage"),
+    name: str = typer.Option(..., "--name"),
+    system_file: Path = typer.Option(..., "--system-file"),
+    template_file: Path = typer.Option(..., "--template-file"),
+    activate: bool = typer.Option(True, "--activate/--no-activate"),
+) -> None:
+    service = _service(ctx)
+    row = service.add_prompt(
+        stage=stage,
+        name=name,
+        system_prompt=system_file.read_text(encoding="utf-8-sig"),
+        user_template=template_file.read_text(encoding="utf-8-sig"),
+        activate=activate,
+    )
+    _emit(_prompt_view(service, row))
+
+
+@prompt_app.command("activate")
+def prompt_activate(ctx: typer.Context, prompt_id: str) -> None:
+    service = _service(ctx)
+    _emit(_prompt_view(service, service.prompts.activate(prompt_id)))
 
 
 @generate_app.command("start")
@@ -285,23 +342,42 @@ def generate_start(
     project_id: str,
     executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
     rule_id: str | None = typer.Option(None, "--rule"),
-    batch_five: bool = typer.Option(False, "--batch-five"),
     provider_profile_id: str | None = typer.Option(None, "--provider"),
+    prompt_revision_id: str | None = typer.Option(None, "--prompt"),
     run: bool = typer.Option(False, "--run"),
 ) -> None:
-    service = _service(ctx)
-    experiment_id = service.start_generation(
+    _start_generation_command(
+        ctx,
         project_id,
         executor=executor,
         rule_id=rule_id,
-        batch_five=batch_five,
         provider_profile_id=provider_profile_id,
+        prompt_revision_id=prompt_revision_id,
+        batch_five=False,
+        run=run,
     )
-    if run:
-        if executor is not ExecutorKind.API:
-            raise typer.BadParameter("--run 仅适用于 API 执行器")
-        asyncio.run(service.run_api_jobs(project_id))
-    _emit({"experiment_id": experiment_id})
+
+
+@experiment_app.command("batch-five")
+def experiment_batch_five(
+    ctx: typer.Context,
+    project_id: str,
+    executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
+    rule_id: str | None = typer.Option(None, "--rule"),
+    provider_profile_id: str | None = typer.Option(None, "--provider"),
+    prompt_revision_id: str | None = typer.Option(None, "--prompt"),
+    run: bool = typer.Option(False, "--run"),
+) -> None:
+    _start_generation_command(
+        ctx,
+        project_id,
+        executor=executor,
+        rule_id=rule_id,
+        provider_profile_id=provider_profile_id,
+        prompt_revision_id=prompt_revision_id,
+        batch_five=True,
+        run=run,
+    )
 
 
 @experiment_app.command("compare-rules")
@@ -311,6 +387,7 @@ def experiment_compare_rules(
     rule_id: list[str] = typer.Option(..., "--rule"),
     executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
     provider_profile_id: str | None = typer.Option(None, "--provider"),
+    prompt_revision_id: str | None = typer.Option(None, "--prompt"),
     run: bool = typer.Option(False, "--run"),
 ) -> None:
     service = _service(ctx)
@@ -319,6 +396,7 @@ def experiment_compare_rules(
         executor=executor,
         rule_ids=rule_id,
         provider_profile_id=provider_profile_id,
+        prompt_revision_id=prompt_revision_id,
     )
     if run:
         if executor is not ExecutorKind.API:
@@ -327,26 +405,39 @@ def experiment_compare_rules(
     _emit({"experiment_id": experiment_id})
 
 
+@experiment_app.command("show")
+def experiment_show(ctx: typer.Context, experiment_id: str) -> None:
+    _emit(_service(ctx).experiment_detail(experiment_id))
+
+
 @result_app.command("list")
 def result_list(ctx: typer.Context, project_id: str) -> None:
-    _emit(
-        [
-            _row(row, omit={"raw_response"})
-            for row in _service(ctx).repository.list_generations(project_id)
-        ]
-    )
+    _emit(_service(ctx).list_results(project_id))
 
 
 @result_app.command("select")
 def result_select(ctx: typer.Context, generation_id: str) -> None:
-    _emit(_row(_service(ctx).repository.select_generation(generation_id), omit={"raw_response"}))
+    _service(ctx).results.select(generation_id)
+    _emit({"generation_id": generation_id, "selected": True})
+
+
+@result_app.command("edit")
+def result_edit(
+    ctx: typer.Context,
+    generation_id: str,
+    file: Path = typer.Option(..., "--file"),
+) -> None:
+    revision = _service(ctx).results.add_revision(
+        generation_id, file.read_text(encoding="utf-8-sig")
+    )
+    _emit(row_dict(revision))
 
 
 @result_app.command("export")
 def result_export(ctx: typer.Context, generation_id: str, output: Path) -> None:
-    row = _service(ctx).repository.get_generation(generation_id)
+    content = _service(ctx).results.current_content(generation_id)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(row.content + "\n", encoding="utf-8")
+    output.write_text(content + "\n", encoding="utf-8")
     _emit({"generation_id": generation_id, "output": str(output.resolve())})
 
 
@@ -376,29 +467,79 @@ def provider_configure(
     _emit({"provider_profile_id": profile_id})
 
 
+@provider_app.command("list")
+def provider_list(ctx: typer.Context) -> None:
+    _emit([row_dict(row, omit={"secret_key_name"}) for row in _service(ctx).providers.list()])
+
+
+@provider_app.command("test")
+def provider_test(
+    ctx: typer.Context,
+    profile_id: str | None = typer.Option(None, "--provider"),
+) -> None:
+    _emit(asyncio.run(_service(ctx).test_provider(profile_id)))
+
+
+@provider_app.command("activate")
+def provider_activate(ctx: typer.Context, profile_id: str) -> None:
+    _emit(row_dict(_service(ctx).providers.activate(profile_id), omit={"secret_key_name"}))
+
+
+def _start_generation_command(
+    ctx: typer.Context,
+    project_id: str,
+    *,
+    executor: ExecutorKind,
+    rule_id: str | None,
+    provider_profile_id: str | None,
+    prompt_revision_id: str | None,
+    batch_five: bool,
+    run: bool,
+) -> None:
+    service = _service(ctx)
+    experiment_id = service.start_generation(
+        project_id,
+        executor=executor,
+        rule_id=rule_id,
+        batch_five=batch_five,
+        provider_profile_id=provider_profile_id,
+        prompt_revision_id=prompt_revision_id,
+    )
+    if run:
+        if executor is not ExecutorKind.API:
+            raise typer.BadParameter("--run 仅适用于 API 执行器")
+        asyncio.run(service.run_api_jobs(project_id))
+    _emit({"experiment_id": experiment_id})
+
+
 def _service(ctx: typer.Context) -> InkFlowService:
     return ctx.obj["service"]
+
+
+def _prompt_view(service: InkFlowService, row) -> dict[str, Any]:
+    return {
+        **row_dict(row),
+        "entity_path": service.prompts.entity_path(row),
+        "editable_file": service.prompts.editable_file(row),
+    }
 
 
 def _text_argument(value: str | None, path: Path | None, label: str) -> str:
     if value is not None and path is not None:
         raise typer.BadParameter(f"{label} 不能同时从文本和文件读取")
     if path is not None:
-        return path.read_text(encoding="utf-8-sig").strip()
+        return path.read_text(encoding="utf-8-sig")
     if value is not None:
-        return value.strip()
+        return value
     if not sys.stdin.isatty():
-        return sys.stdin.read().strip()
+        return sys.stdin.read()
     raise typer.BadParameter(f"缺少 {label}")
 
 
-def _row(row: Any, *, omit: set[str] | None = None) -> dict[str, Any]:
-    excluded = omit or set()
-    return {
-        column.name: getattr(row, column.name)
-        for column in row.__table__.columns
-        if column.name not in excluded
-    }
+def _available_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
 
 
 def _emit(value: Any) -> None:
@@ -406,7 +547,27 @@ def _emit(value: Any) -> None:
 
 
 def main() -> None:
-    app()
+    try:
+        app()
+    except PermissionError as exc:
+        _emit_error(exc, exit_code=3)
+    except FileNotFoundError as exc:
+        _emit_error(exc, exit_code=4)
+    except ValueError as exc:
+        _emit_error(exc, exit_code=2)
+    except RuntimeError as exc:
+        _emit_error(exc, exit_code=5)
+
+
+def _emit_error(exc: Exception, *, exit_code: int) -> None:
+    typer.echo(
+        json.dumps(
+            {"error": type(exc).__name__, "detail": str(exc)},
+            ensure_ascii=False,
+        ),
+        err=True,
+    )
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

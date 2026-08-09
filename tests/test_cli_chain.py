@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,52 @@ from typer.testing import CliRunner
 
 from inkflow.cli import app
 
-REAL_100X_LIBRARY = Path(r"E:\Work\BaiduSyncdisk\Code\100x-learning\System Knowledge")
+REAL_100X_LIBRARY = Path(os.environ.get("INKFLOW_100X_LIBRARY", "__missing_100x_library__"))
+
+
+def test_cli_preserves_invalid_external_result(tmp_path: Path) -> None:
+    runner = CliRunner()
+    prefix = ["--data-dir", str(tmp_path / "data")]
+    project_id = invoke_json(
+        runner,
+        prefix
+        + [
+            "project",
+            "create",
+            "--title",
+            "格式错误",
+            "--request",
+            "写作",
+            "--material",
+            "材料",
+        ],
+    )["project_id"]
+    invoke_json(runner, prefix + ["prepare", "start", project_id])
+    envelope = invoke_json(runner, prefix + ["job", "next", "--project", project_id])
+    raw = '{"purified_material":"未闭合"'
+
+    failed = runner.invoke(
+        app,
+        prefix
+        + [
+            "job",
+            "submit",
+            envelope["job_id"],
+            "--attempt-id",
+            envelope["attempt_id"],
+            "--lease-token",
+            envelope["lease_token"],
+            "--result",
+            raw,
+        ],
+    )
+
+    assert failed.exit_code != 0
+    state = invoke_json(runner, prefix + ["project", "show", project_id])
+    job = next(item for item in state["jobs"] if item["id"] == envelope["job_id"])
+    assert job["status"] == "failed"
+    assert job["attempts"][0]["raw_response"] == raw
+    assert "invalid model JSON" in job["attempts"][0]["format_error"]
 
 
 @pytest.mark.skipif(
@@ -50,6 +96,8 @@ def test_cli_drives_the_full_external_writing_chain(tmp_path: Path) -> None:
             prepare["job_id"],
             "--lease-token",
             prepare["lease_token"],
+            "--attempt-id",
+            prepare["attempt_id"],
             "--result",
             json.dumps(
                 {
@@ -75,6 +123,8 @@ def test_cli_drives_the_full_external_writing_chain(tmp_path: Path) -> None:
             selection["job_id"],
             "--lease-token",
             selection["lease_token"],
+            "--attempt-id",
+            selection["attempt_id"],
             "--result",
             json.dumps({"case_ids": [case_id], "hook_ids": [hook_id]}, ensure_ascii=False),
         ],
@@ -86,9 +136,9 @@ def test_cli_drives_the_full_external_writing_chain(tmp_path: Path) -> None:
     assert handoff["core"]["reference_hooks"]
     invoke_json(runner, prefix + ["handoff", "approve", project_id])
 
-    invoke_json(runner, prefix + ["generate", "start", project_id, "--batch-five"])
+    invoke_json(runner, prefix + ["experiment", "batch-five", project_id])
     generation = invoke_json(runner, prefix + ["job", "next", "--project", project_id])
-    assert generation["payload"]["output_count"] == 5
+    assert generation["payload"]["generation_settings"]["output_count"] == 5
     outputs = [f"CLI 原始成品 {index}" for index in range(1, 6)]
     invoke_json(
         runner,
@@ -99,12 +149,14 @@ def test_cli_drives_the_full_external_writing_chain(tmp_path: Path) -> None:
             generation["job_id"],
             "--lease-token",
             generation["lease_token"],
+            "--attempt-id",
+            generation["attempt_id"],
             "--result",
             json.dumps({"outputs": outputs}, ensure_ascii=False),
         ],
     )
     results = invoke_json(runner, prefix + ["result", "list", project_id])
-    assert [item["content"] for item in results] == outputs
+    assert [item["current_content"] for item in results] == outputs
 
 
 def invoke_json(runner: CliRunner, args: list[str]):

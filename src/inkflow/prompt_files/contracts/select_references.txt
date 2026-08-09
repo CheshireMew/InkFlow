@@ -1,0 +1,2 @@
+只返回一个符合下列 JSON Schema 的合法 JSON 对象，不要添加代码围栏或解释：
+{{result_schema}}

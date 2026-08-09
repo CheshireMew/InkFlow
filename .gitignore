@@ -21,6 +21,9 @@ venv/
 node_modules/
 dist/
 
+# Browser verification runtime profiles
+archive/verification-*/chrome-*/
+
 # IDE
 .idea/
 .vscode/

@@ -25,12 +25,19 @@ class JobKind(str, Enum):
     GENERATE = "generate"
 
 
+class PromptStage(str, Enum):
+    PREPARE_MATERIAL = "prepare_material"
+    SELECT_REFERENCES = "select_references"
+    GENERATE = "generate"
+
+
 class ExecutorKind(str, Enum):
     EXTERNAL = "external"
     API = "api"
 
 
 class JobStatus(str, Enum):
+    WAITING = "waiting"
     PENDING = "pending"
     LEASED = "leased"
     SUCCEEDED = "succeeded"
@@ -82,7 +89,7 @@ class ExecutionPackage(BaseModel):
         hooks = "\n\n".join(item.strip() for item in self.handoff.reference_hooks if item.strip())
         return "\n\n".join(
             [
-                "【本次写作要求】\n" + self.handoff.user_request.strip(),
+                "【本次写作要求】\n" + self.handoff.user_request,
                 "【写作规则】\n" + self.writing_rule.strip(),
                 "【净化后材料】\n" + self.handoff.purified_material.strip(),
                 "【参考写作案例】\n" + (cases or "本次未使用参考写作案例"),
@@ -101,8 +108,12 @@ class ExecutionPackage(BaseModel):
 
 
 class JobEnvelope(BaseModel):
-    schema_version: int = 1
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 2
     job_id: str
+    attempt_id: str
+    attempt: int
     lease_token: str
     kind: JobKind
     input_hash: str
@@ -130,6 +141,49 @@ class GenerationResult(BaseModel):
     outputs: list[str]
     raw_response: str | None = None
     executor_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptDefinition(BaseModel):
+    """Immutable prompt revision content before project data is rendered into it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    stage: PromptStage
+    name: str
+    revision: int
+    system_prompt: str
+    user_template: str
+    contract_version: int = 1
+    prompt_hash: str
+    entity_file: str
+
+
+class PromptSnapshot(BaseModel):
+    """The exact prompt content and identity used by one job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    definition: PromptDefinition
+    system_prompt: str
+    user_prompt: str
+    rendered_hash: str
+
+
+class ProviderSnapshot(BaseModel):
+    """Non-secret, immutable provider configuration captured for a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    revision: int
+    adapter: str
+    base_url: str
+    model: str
+    capabilities: dict[str, Any]
+    parameters: dict[str, Any]
+    config_hash: str
 
 
 def stable_hash(value: Any) -> str:

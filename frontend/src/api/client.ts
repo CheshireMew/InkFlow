@@ -1,63 +1,17 @@
-export type Project = {
-  id: string
-  title: string
-  user_request: string
-  created_at: string
-  updated_at: string
-}
-
-export type Source = {
-  id: string
-  content: string
-  kind: string
-  created_at: string
-}
-
-export type Job = {
-  id: string
-  kind: string
-  executor: string
-  status: string
-  error?: string | null
-}
-
-export type ProjectDetail = {
-  project: Project
-  sources: Source[]
-  jobs: Job[]
-  experiments: Record<string, unknown>[]
-}
-
-export type HandoffCore = {
-  user_request: string
-  purified_material: string
-  reference_cases: string[]
-  reference_hooks: string[]
-  other_inputs: string
-}
-
-export type Handoff = {
-  handoff: { id: string; revision: number; status: string; core_hash: string }
-  core: HandoffCore
-}
-
-export type WritingRule = {
-  id: string
-  name: string
-  revision: number
-  body: string
-  body_hash: string
-  active: boolean
-}
-
-export type Generation = {
-  id: string
-  content: string
-  writing_rule_id: string
-  output_index: number
-  selected: boolean
-  created_at: string
-}
+import type {
+  Executor,
+  ExperimentDetail,
+  Generation,
+  Handoff,
+  HandoffCore,
+  Project,
+  ProjectDetail,
+  PromptRevision,
+  PromptStage,
+  ProviderProfile,
+  ReferenceItem,
+  WritingRule,
+} from '../types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -71,67 +25,57 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+const post = <T>(path: string, payload?: unknown) =>
+  request<T>(path, {
+    method: 'POST',
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  })
+
+const put = <T>(path: string, payload: unknown) =>
+  request<T>(path, { method: 'PUT', body: JSON.stringify(payload) })
+
 export const api = {
+  health: () => request<Record<string, unknown>>('/api/health'),
   projects: () => request<Project[]>('/api/projects'),
   project: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
   createProject: (payload: { title: string; user_request: string; materials: string[] }) =>
-    request<{ project_id: string }>('/api/projects', { method: 'POST', body: JSON.stringify(payload) }),
-  addSource: (id: string, content: string) =>
-    request<{ source_id: string }>(`/api/projects/${id}/sources`, {
-      method: 'POST',
-      body: JSON.stringify({ content }),
-    }),
+    post<{ project_id: string }>('/api/projects', payload),
+  updateProject: (id: string, user_request: string) =>
+    put<{ project_id: string }>(`/api/projects/${id}`, { user_request }),
+  addSource: (id: string, payload: { content?: string; url?: string }) =>
+    post<{ source_id: string }>(`/api/projects/${id}/sources`, payload),
   import100x: (library_root: string) =>
-    request<Record<string, unknown>>('/api/references/import-100x', {
-      method: 'POST',
-      body: JSON.stringify({ library_root }),
-    }),
-  prepare: (id: string, executor: 'external' | 'api', run: boolean) =>
-    request<{ job_id: string }>(`/api/projects/${id}/prepare`, {
-      method: 'POST',
-      body: JSON.stringify({ executor, run }),
-    }),
+    post<Record<string, unknown>>('/api/references/import-100x', { library_root }),
+  references: (includeInactive = true) =>
+    request<ReferenceItem[]>(`/api/references?include_inactive=${includeInactive}`),
+  reference: (id: string) => request<ReferenceItem>(`/api/references/${id}`),
+  addReference: (payload: Omit<ReferenceItem, 'id' | 'body_preview' | 'formats_json' | 'techniques_json'> & { body: string; formats: string[]; techniques: string[] }) =>
+    post<ReferenceItem>('/api/references', payload),
+  updateReference: (id: string, payload: { kind: 'case' | 'hook'; title: string; body: string; formats: string[]; techniques: string[]; active: boolean }) =>
+    put<ReferenceItem>(`/api/references/${id}`, payload),
+  prepare: (id: string, payload: { executor: Executor; run: boolean; prepare_prompt_id?: string; reference_prompt_id?: string; provider_profile_id?: string }) =>
+    post<{ job_id: string }>(`/api/projects/${id}/prepare`, payload),
+  retryJob: (id: string) => post<{ job_id: string; status: string }>(`/api/jobs/${id}/retry`),
   handoff: (id: string) => request<Handoff>(`/api/projects/${id}/handoff`),
-  reviseHandoff: (id: string, core: HandoffCore) =>
-    request<Record<string, unknown>>(`/api/projects/${id}/handoff`, {
-      method: 'PUT',
-      body: JSON.stringify(core),
-    }),
-  approveHandoff: (id: string) =>
-    request<Record<string, unknown>>(`/api/projects/${id}/handoff/approve`, { method: 'POST' }),
+  handoffs: (id: string) => request<Handoff[]>(`/api/projects/${id}/handoffs`),
+  reviseHandoff: (id: string, core: HandoffCore) => put<Record<string, unknown>>(`/api/projects/${id}/handoff`, core),
+  approveHandoff: (id: string) => post<Record<string, unknown>>(`/api/projects/${id}/handoff/approve`),
   rules: () => request<WritingRule[]>('/api/rules'),
-  addRule: (payload: { name: string; body: string; activate: boolean }) =>
-    request<WritingRule>('/api/rules', { method: 'POST', body: JSON.stringify(payload) }),
-  activateRule: (id: string) => request<WritingRule>(`/api/rules/${id}/activate`, { method: 'POST' }),
-  configureProvider: (payload: {
-    name: string
-    adapter: 'openai-compatible-chat' | 'openai-responses'
-    base_url: string
-    model: string
-    api_key: string
-    parameters: Record<string, unknown>
-    activate: boolean
-  }) => request<{ provider_profile_id: string }>('/api/providers', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  }),
-  generate: (
-    id: string,
-    payload: {
-      executor: 'external' | 'api'
-      run: boolean
-      rule_id?: string
-      batch_five: boolean
-    },
-  ) => request<{ experiment_id: string }>(`/api/projects/${id}/generate`, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  }),
-  compareRules: (id: string, rule_ids: string[], executor: 'external' | 'api', run: boolean) =>
-    request<{ experiment_id: string }>(`/api/projects/${id}/compare-rules`, {
-      method: 'POST',
-      body: JSON.stringify({ rule_ids, executor, run }),
-    }),
+  addRule: (payload: { name: string; body: string; activate: boolean }) => post<WritingRule>('/api/rules', payload),
+  activateRule: (id: string) => post<WritingRule>(`/api/rules/${id}/activate`),
+  prompts: (stage?: PromptStage) => request<PromptRevision[]>(`/api/prompts${stage ? `?stage=${stage}` : ''}`),
+  addPrompt: (payload: { stage: PromptStage; name: string; system_prompt: string; user_template: string; activate: boolean }) => post<PromptRevision>('/api/prompts', payload),
+  activatePrompt: (id: string) => post<PromptRevision>(`/api/prompts/${id}/activate`),
+  providers: () => request<ProviderProfile[]>('/api/providers'),
+  configureProvider: (payload: { name: string; adapter: ProviderProfile['adapter']; base_url: string; model: string; api_key: string; parameters: Record<string, unknown>; activate: boolean }) => post<{ provider_profile_id: string }>('/api/providers', payload),
+  activateProvider: (id: string) => post<ProviderProfile>(`/api/providers/${id}/activate`),
+  testProvider: (id: string) => post<Record<string, unknown>>(`/api/providers/${id}/test`),
+  generate: (id: string, payload: { executor: Executor; run: boolean; rule_id?: string; provider_profile_id?: string; prompt_revision_id?: string }) => post<{ experiment_id: string }>(`/api/projects/${id}/generate`, payload),
+  batchFive: (id: string, payload: { executor: Executor; run: boolean; rule_id?: string; provider_profile_id?: string; prompt_revision_id?: string }) => post<{ experiment_id: string }>(`/api/projects/${id}/batch-five`, payload),
+  compareRules: (id: string, payload: { rule_ids: string[]; executor: Executor; run: boolean; provider_profile_id?: string; prompt_revision_id?: string }) => post<{ experiment_id: string }>(`/api/projects/${id}/compare-rules`, payload),
+  experiment: (id: string) => request<ExperimentDetail>(`/api/experiments/${id}`),
   results: (id: string) => request<Generation[]>(`/api/projects/${id}/results`),
-  selectResult: (id: string) => request<Generation>(`/api/results/${id}/select`, { method: 'POST' }),
+  selectResult: (id: string) => post<Generation>(`/api/results/${id}/select`),
+  editResult: (id: string, content: string) => post<Record<string, unknown>>(`/api/results/${id}/revisions`, { content }),
+  exportUrl: (id: string) => `/api/results/${id}/export`,
 }

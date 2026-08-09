@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "prompt-builtin-select-references-1356c9c34b6c",
+  "stage": "select_references",
+  "name": "100x 当前案例与钩子选择",
+  "system_prompt": "根据用户要求和净化材料，从给定索引中选择有帮助的参考写作案例与参考开头钩子。\n案例和钩子只帮助写法，不提供当前对象的事实、人物、经历、立场或作者身份，也不增加正文需要覆盖的信息。\n两者必须来自不同文件，完整正文也不能相同；缺少可区分的另一份参考时保持缺省。\n不要规定正文结构，不要解释选择过程，不要为了凑数选择参考。",
+  "user_template": "用户明确要求：\n{{user_request}}\n\n净化后材料：\n{{purified_material}}\n\n可选参考索引：\n{{reference_index}}",
+  "contract_version": 1,
+  "revision": null,
+  "default_active": true,
+  "source": {
+    "kind": "100x-working-tree",
+    "path": "SKILL.md#写作"
+  }
+}

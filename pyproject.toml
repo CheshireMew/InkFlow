@@ -36,6 +36,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/inkflow"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"frontend/dist" = "inkflow/frontend_dist"
+"src/inkflow/prompt_files" = "inkflow/prompt_files"
+
 [tool.ruff]
 line-length = 100
 

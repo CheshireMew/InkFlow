@@ -19,7 +19,7 @@ class AppPaths:
             config_dir = data_dir / "config"
             cache_dir = data_dir / "cache"
         else:
-            dirs = PlatformDirs(appname="InkFlow", appauthor="InkFlow", roaming=False)
+            dirs = PlatformDirs(appname="InkFlow", appauthor=False, roaming=False)
             data_dir = Path(dirs.user_data_path)
             config_dir = Path(dirs.user_config_path)
             cache_dir = Path(dirs.user_cache_path)

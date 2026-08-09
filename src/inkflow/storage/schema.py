@@ -62,6 +62,24 @@ class WritingRuleRow(Base):
     created_at: Mapped[str] = mapped_column(String(40))
 
 
+class PromptRevisionRow(Base):
+    __tablename__ = "prompt_revisions"
+    __table_args__ = (UniqueConstraint("stage", "revision", name="uq_prompt_stage_revision"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    stage: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    revision: Mapped[int] = mapped_column(Integer)
+    system_prompt: Mapped[str] = mapped_column(Text)
+    user_template: Mapped[str] = mapped_column(Text)
+    contract_version: Mapped[int] = mapped_column(Integer, default=1)
+    prompt_hash: Mapped[str] = mapped_column(String(64), index=True)
+    entity_file: Mapped[str] = mapped_column(Text)
+    origin: Mapped[str] = mapped_column(String(20), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
 class HandoffRow(Base):
     __tablename__ = "handoff_revisions"
     __table_args__ = (UniqueConstraint("project_id", "revision", name="uq_handoff_revision"),)
@@ -86,15 +104,18 @@ class HandoffRow(Base):
 
 class ProviderProfileRow(Base):
     __tablename__ = "provider_profiles"
+    __table_args__ = (UniqueConstraint("name", "revision", name="uq_provider_name_revision"),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    name: Mapped[str] = mapped_column(String(200), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
     adapter: Mapped[str] = mapped_column(String(80))
     base_url: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(String(200))
     capabilities_json: Mapped[str] = mapped_column(Text, default="{}")
     parameters_json: Mapped[str] = mapped_column(Text, default="{}")
     secret_key_name: Mapped[str] = mapped_column(String(200))
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[str] = mapped_column(String(40))
 
@@ -112,6 +133,10 @@ class ExperimentRow(Base):
     provider_profile_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("provider_profiles.id"), nullable=True
     )
+    prompt_revision_id: Mapped[str] = mapped_column(ForeignKey("prompt_revisions.id"))
+    prompt_snapshot_json: Mapped[str] = mapped_column(Text)
+    provider_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    generation_settings_json: Mapped[str] = mapped_column(Text, default="{}")
     fixed_input_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), index=True)
     created_at: Mapped[str] = mapped_column(String(40))
@@ -155,12 +180,23 @@ class JobRow(Base):
     status: Mapped[str] = mapped_column(String(20), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
     input_hash: Mapped[str] = mapped_column(String(64), index=True)
-    lease_token: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
-    leased_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
-    attempt: Mapped[int] = mapped_column(Integer, default=0)
-    result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40))
+
+
+class JobAttemptRow(Base):
+    __tablename__ = "job_attempts"
+    __table_args__ = (UniqueConstraint("job_id", "attempt", name="uq_job_attempt"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    lease_token: Mapped[str] = mapped_column(String(96), unique=True)
+    leased_at: Mapped[str] = mapped_column(String(40))
+    result_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    format_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
 
 
@@ -182,8 +218,32 @@ class GenerationRow(Base):
     content: Mapped[str] = mapped_column(Text)
     raw_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     executor_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    prompt_snapshot_json: Mapped[str] = mapped_column(Text)
+    provider_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    generation_settings_json: Mapped[str] = mapped_column(Text, default="{}")
     selected: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[str] = mapped_column(String(40))
+
+
+class GenerationRevisionRow(Base):
+    __tablename__ = "generation_revisions"
+    __table_args__ = (UniqueConstraint("generation_id", "revision", name="uq_generation_revision"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    generation_id: Mapped[str] = mapped_column(
+        ForeignKey("generations.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    origin: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[str] = mapped_column(String(40))
+
+
+class SchemaMetaRow(Base):
+    __tablename__ = "schema_meta"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
 
 
 Index("idx_jobs_project_status_created", JobRow.project_id, JobRow.status, JobRow.created_at)

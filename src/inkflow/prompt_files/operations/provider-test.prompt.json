@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "供应商连接测试",
+  "system_prompt": "这是连接测试。只返回 JSON 对象。",
+  "user_prompt": "返回 {\"ok\":true}。"
+}
