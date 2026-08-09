@@ -9,9 +9,11 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from inkflow.domain import ExecutorKind, HandoffCore, PromptStage, ReferenceKind
+from inkflow.__about__ import __version__
+from inkflow.domain import ExecutorKind, HandoffCore, PromptStage, ReferenceKind, ReviewState
 from inkflow.paths import AppPaths
 from inkflow.resources import frontend_dist
+from inkflow.runtime_logging import ai_audit_path
 from inkflow.serialization import row_dict
 from inkflow.service import InkFlowService
 from inkflow.storage import Database
@@ -42,11 +44,12 @@ class SourceCreate(StrictModel):
         return self
 
 
+class SourceUpdate(StrictModel):
+    content: str = Field(min_length=1)
+
+
 class StartPreparation(StrictModel):
     executor: ExecutorKind = ExecutorKind.EXTERNAL
-    run: bool = False
-    prepare_prompt_id: str | None = None
-    reference_prompt_id: str | None = None
     provider_profile_id: str | None = None
 
 
@@ -62,28 +65,21 @@ class RuleCreate(StrictModel):
     activate: bool = False
 
 
-class PromptCreate(StrictModel):
-    stage: PromptStage
+class PromptSave(StrictModel):
     name: str
     system_prompt: str
     user_template: str
-    activate: bool = True
 
 
 class GenerationStart(StrictModel):
     executor: ExecutorKind = ExecutorKind.EXTERNAL
-    run: bool = False
     rule_id: str | None = None
     provider_profile_id: str | None = None
-    prompt_revision_id: str | None = None
 
 
 class ComparisonStart(StrictModel):
-    executor: ExecutorKind = ExecutorKind.EXTERNAL
-    run: bool = False
     rule_ids: list[str]
-    provider_profile_id: str | None = None
-    prompt_revision_id: str | None = None
+    provider_profile_id: str
 
 
 class ProviderConfigure(StrictModel):
@@ -113,10 +109,14 @@ class ResultEdit(StrictModel):
     content: str
 
 
+class ResultReview(StrictModel):
+    state: ReviewState
+
+
 def create_app(data_dir: Path | None = None) -> FastAPI:
     paths = AppPaths.resolve(override_data_dir=data_dir)
     service = InkFlowService(Database(paths.database_path))
-    app = FastAPI(title="InkFlow", version="0.3.0")
+    app = FastAPI(title="InkFlow", version=__version__)
     app.state.service = service
 
     @app.exception_handler(FileNotFoundError)
@@ -135,13 +135,24 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def health() -> dict[str, Any]:
         return service.doctor()
 
+    @app.get("/api/diagnostics/ai-audit")
+    def download_ai_audit():
+        path = ai_audit_path()
+        if path is None or not path.is_file():
+            raise HTTPException(404, "AI audit log has not been created")
+        return FileResponse(
+            path,
+            media_type="application/x-ndjson",
+            filename="inkflow-ai-audit.jsonl",
+        )
+
     @app.get("/api/projects")
     def list_projects() -> list[dict[str, Any]]:
         return [row_dict(row) for row in service.projects.list()]
 
     @app.post("/api/projects")
     def create_project(payload: ProjectCreate) -> dict[str, str]:
-        project_id = service.create_project(
+        project_id = service.project_inputs.create_project(
             title=payload.title,
             user_request=payload.user_request,
             materials=[("", item) for item in payload.materials],
@@ -169,17 +180,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             ],
         }
 
+    @app.get("/api/projects/{project_id}/activity")
+    def project_activity(project_id: str) -> dict[str, Any]:
+        return service.workflows.project_activity(project_id)
+
     @app.put("/api/projects/{project_id}")
     def update_project(project_id: str, payload: ProjectUpdate) -> dict[str, str]:
-        service.update_project_request(project_id, payload.user_request)
+        service.project_inputs.update_request(project_id, payload.user_request)
         return {"project_id": project_id}
 
     @app.post("/api/projects/{project_id}/sources")
     def add_source(project_id: str, payload: SourceCreate) -> dict[str, str]:
         if payload.url:
-            source_id = service.add_url_source(project_id, payload.url)
+            source_id = service.project_inputs.add_url_source(project_id, payload.url)
         else:
-            source_id = service.add_source(
+            source_id = service.project_inputs.add_source(
                 project_id,
                 content=str(payload.content),
                 kind="pasted",
@@ -187,9 +202,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             )
         return {"source_id": source_id}
 
+    @app.put("/api/projects/{project_id}/sources/{source_id}")
+    def update_source(
+        project_id: str, source_id: str, payload: SourceUpdate
+    ) -> dict[str, str]:
+        service.project_inputs.update_source(project_id, source_id, payload.content)
+        return {"source_id": source_id}
+
     @app.post("/api/references/import-100x")
     def import_references(payload: ImportRequest) -> dict[str, object]:
-        return service.import_100x(payload.library_root).as_dict()
+        return service.project_inputs.import_100x(payload.library_root).as_dict()
 
     @app.get("/api/references")
     def list_references(
@@ -250,27 +272,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         payload: StartPreparation,
         background_tasks: BackgroundTasks,
     ) -> dict[str, str]:
-        job_id = service.start_preparation(
+        job_id = service.jobs.start_preparation(
             project_id,
             executor=payload.executor,
-            prepare_prompt_id=payload.prepare_prompt_id,
-            reference_prompt_id=payload.reference_prompt_id,
             provider_profile_id=payload.provider_profile_id,
         )
-        if payload.run:
-            if payload.executor is not ExecutorKind.API:
-                raise HTTPException(400, "run 仅适用于 API 执行器")
-            background_tasks.add_task(service.run_api_jobs, project_id)
+        if payload.executor is ExecutorKind.API:
+            background_tasks.add_task(service.jobs.run_api_jobs, project_id)
         return {"job_id": job_id}
 
     @app.get("/api/jobs/next")
     def next_job(project_id: str | None = None) -> dict[str, Any] | None:
-        envelope = service.lease_external_job(project_id)
+        envelope = service.jobs.lease_external(project_id)
         return envelope.model_dump(mode="json") if envelope else None
 
     @app.post("/api/jobs/{job_id}/submit")
     def submit_job(job_id: str, payload: JobSubmission) -> dict[str, str]:
-        service.submit_job_result(
+        service.jobs.submit_result(
             job_id,
             attempt_id=payload.attempt_id,
             lease_token=payload.lease_token,
@@ -279,8 +297,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         return {"job_id": job_id, "status": "succeeded"}
 
     @app.post("/api/jobs/{job_id}/retry")
-    def retry_job(job_id: str) -> dict[str, str]:
-        service.retry_job(job_id)
+    def retry_job(job_id: str, background_tasks: BackgroundTasks) -> dict[str, str]:
+        job = service.jobs.retry(job_id)
+        if job.executor == ExecutorKind.API.value:
+            background_tasks.add_task(service.jobs.run_api_jobs, job.project_id)
         return {"job_id": job_id, "status": "pending"}
 
     @app.get("/api/projects/{project_id}/handoff")
@@ -303,15 +323,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.put("/api/projects/{project_id}/handoff")
     def revise_handoff(project_id: str, payload: HandoffCore) -> dict[str, Any]:
-        return row_dict(service.revise_handoff(project_id, payload))
+        return row_dict(service.handoffs.revise(project_id, payload))
 
     @app.post("/api/projects/{project_id}/handoff/approve")
     def approve_handoff(project_id: str) -> dict[str, Any]:
-        return row_dict(service.approve_handoff(project_id))
+        return row_dict(service.handoffs.approve(project_id))
 
     @app.get("/api/projects/{project_id}/handoff/render")
     def render_handoff(project_id: str, rule_id: str | None = None) -> dict[str, str]:
-        return {"content": service.render_handoff(project_id, rule_id=rule_id)}
+        return {"content": service.handoffs.render(project_id, rule_id=rule_id)}
 
     @app.get("/api/rules")
     def list_rules() -> list[dict[str, Any]]:
@@ -320,26 +340,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/rules")
     def add_rule(payload: RuleCreate) -> dict[str, Any]:
         return row_dict(
-            service.add_rule(name=payload.name, body=payload.body, activate=payload.activate)
+            service.library.add_rule(
+                name=payload.name, body=payload.body, activate=payload.activate
+            )
         )
 
     @app.post("/api/rules/{rule_id}/activate")
     def activate_rule(rule_id: str) -> dict[str, Any]:
-        return row_dict(service.activate_rule(rule_id))
+        return row_dict(service.library.activate_rule(rule_id))
 
     @app.get("/api/prompts")
     def list_prompts(stage: PromptStage | None = None) -> list[dict[str, Any]]:
-        return [_prompt_view(service, row) for row in service.prompts.list(stage)]
+        return [_prompt_view(prompt) for prompt in service.prompts.list(stage)]
 
-    @app.post("/api/prompts")
-    def add_prompt(payload: PromptCreate) -> dict[str, Any]:
-        row = service.add_prompt(**payload.model_dump())
-        return _prompt_view(service, row)
-
-    @app.post("/api/prompts/{prompt_id}/activate")
-    def activate_prompt(prompt_id: str) -> dict[str, Any]:
-        row = service.prompts.activate(prompt_id)
-        return _prompt_view(service, row)
+    @app.put("/api/prompts/{stage}")
+    def save_prompt(stage: PromptStage, payload: PromptSave) -> dict[str, Any]:
+        prompt = service.prompts.save(stage=stage, **payload.model_dump())
+        return _prompt_view(prompt)
 
     @app.post("/api/projects/{project_id}/generate")
     async def start_generation(
@@ -347,17 +364,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         payload: GenerationStart,
         background_tasks: BackgroundTasks,
     ) -> dict[str, str]:
-        experiment_id = service.start_generation(
+        experiment_id = service.experiments.start_generation(
             project_id,
             executor=payload.executor,
             rule_id=payload.rule_id,
             provider_profile_id=payload.provider_profile_id,
-            prompt_revision_id=payload.prompt_revision_id,
         )
-        if payload.run:
-            if payload.executor is not ExecutorKind.API:
-                raise HTTPException(400, "run 仅适用于 API 执行器")
-            background_tasks.add_task(service.run_api_jobs, project_id)
+        if payload.executor is ExecutorKind.API:
+            background_tasks.add_task(service.jobs.run_api_jobs, project_id)
         return {"experiment_id": experiment_id}
 
     @app.post("/api/projects/{project_id}/batch-five")
@@ -366,18 +380,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         payload: GenerationStart,
         background_tasks: BackgroundTasks,
     ) -> dict[str, str]:
-        experiment_id = service.start_generation(
+        experiment_id = service.experiments.start_generation(
             project_id,
             executor=payload.executor,
             rule_id=payload.rule_id,
             batch_five=True,
             provider_profile_id=payload.provider_profile_id,
-            prompt_revision_id=payload.prompt_revision_id,
         )
-        if payload.run:
-            if payload.executor is not ExecutorKind.API:
-                raise HTTPException(400, "run 仅适用于 API 执行器")
-            background_tasks.add_task(service.run_api_jobs, project_id)
+        if payload.executor is ExecutorKind.API:
+            background_tasks.add_task(service.jobs.run_api_jobs, project_id)
         return {"experiment_id": experiment_id}
 
     @app.post("/api/projects/{project_id}/compare-rules")
@@ -386,33 +397,28 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         payload: ComparisonStart,
         background_tasks: BackgroundTasks,
     ) -> dict[str, str]:
-        experiment_id = service.start_rule_comparison(
+        experiment_id = service.experiments.start_rule_comparison(
             project_id,
-            executor=payload.executor,
             rule_ids=payload.rule_ids,
             provider_profile_id=payload.provider_profile_id,
-            prompt_revision_id=payload.prompt_revision_id,
         )
-        if payload.run:
-            if payload.executor is not ExecutorKind.API:
-                raise HTTPException(400, "run 仅适用于 API 执行器")
-            background_tasks.add_task(service.run_api_jobs, project_id)
+        background_tasks.add_task(service.jobs.run_api_jobs, project_id)
         return {"experiment_id": experiment_id}
 
     @app.get("/api/experiments/{experiment_id}")
     def experiment_detail(experiment_id: str) -> dict[str, Any]:
-        return service.experiment_detail(experiment_id)
+        return service.result_queries.experiment_detail(experiment_id)
 
     @app.get("/api/projects/{project_id}/results")
     def list_results(project_id: str) -> list[dict[str, Any]]:
-        return service.list_results(project_id)
+        return service.result_queries.list(project_id)
 
-    @app.post("/api/results/{generation_id}/select")
-    def select_result(generation_id: str) -> dict[str, Any]:
-        service.results.select(generation_id)
+    @app.put("/api/results/{generation_id}/review")
+    def review_result(generation_id: str, payload: ResultReview) -> dict[str, Any]:
+        service.results.review(generation_id, payload.state)
         return next(
             item
-            for item in service.list_results(service.results.get(generation_id).project_id)
+            for item in service.result_queries.list(service.results.get(generation_id).project_id)
             if item["id"] == generation_id
         )
 
@@ -434,7 +440,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/providers")
     def configure_provider(payload: ProviderConfigure) -> dict[str, str]:
-        profile_id = service.configure_provider(**payload.model_dump())
+        profile_id = service.provider_runtime.configure(**payload.model_dump())
         return {"provider_profile_id": profile_id}
 
     @app.post("/api/providers/{profile_id}/activate")
@@ -443,7 +449,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     @app.post("/api/providers/{profile_id}/test")
     async def test_provider(profile_id: str) -> dict[str, Any]:
-        return await service.test_provider(profile_id)
+        return await service.provider_runtime.test(profile_id)
 
     frontend_root = frontend_dist()
     if frontend_root.is_dir():
@@ -461,9 +467,5 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     return app
 
 
-def _prompt_view(service: InkFlowService, row) -> dict[str, Any]:
-    return {
-        **row_dict(row),
-        "entity_path": service.prompts.entity_path(row),
-        "editable_file": service.prompts.editable_file(row),
-    }
+def _prompt_view(prompt) -> dict[str, Any]:
+    return prompt.model_dump(mode="json")

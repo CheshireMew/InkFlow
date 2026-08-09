@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ReferenceKind(str, Enum):
@@ -38,10 +38,12 @@ class ExecutorKind(str, Enum):
 
 class JobStatus(str, Enum):
     WAITING = "waiting"
+    BLOCKED = "blocked"
     PENDING = "pending"
     LEASED = "leased"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    SUPERSEDED = "superseded"
     CANCELLED = "cancelled"
 
 
@@ -56,6 +58,12 @@ class ExperimentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class ReviewState(str, Enum):
+    UNREVIEWED = "unreviewed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
 
 
 class HandoffCore(BaseModel):
@@ -120,11 +128,29 @@ class JobEnvelope(BaseModel):
     payload: dict[str, Any]
 
 
+class DiscoveredSource(BaseModel):
+    """One external source whose exact text contributed to prepared material."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    url: str
+    content: str
+    use: str
+
+    @field_validator("title", "url", "content", "use")
+    @classmethod
+    def require_non_empty_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("discovered source fields cannot be empty")
+        return value.strip()
+
+
 class PreparationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     purified_material: str
-    discovered_sources: list[dict[str, str]] = Field(default_factory=list)
+    discovered_sources: list[DiscoveredSource] = Field(default_factory=list)
     other_inputs: str = "无"
 
 
@@ -139,24 +165,59 @@ class GenerationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     outputs: list[str]
-    raw_response: str | None = None
-    executor_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class PromptDefinition(BaseModel):
-    """Immutable prompt revision content before project data is rendered into it."""
+class ExternalExecutorMetadata(BaseModel):
+    """Self-declared external runtime facts; never evidence of a controlled run."""
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str
+    runtime: str
+    model: str
+    runtime_version: str | None = None
+    context_mode: Literal["fresh", "reused", "unknown"] = "unknown"
+    tools: list[str] = Field(default_factory=list)
+
+    @field_validator("runtime", "model")
+    @classmethod
+    def require_runtime_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("external runtime and model cannot be empty")
+        return value.strip()
+
+
+class ExternalGenerationResult(GenerationResult):
+    executor_metadata: ExternalExecutorMetadata
+
+
+class PromptDefinition(BaseModel):
+    """The current prompt content before project data is rendered into it."""
+
+    model_config = ConfigDict(extra="forbid")
+
     stage: PromptStage
     name: str
-    revision: int
     system_prompt: str
     user_template: str
     contract_version: int = 1
     prompt_hash: str
-    entity_file: str
+
+
+class CurrentPrompt(BaseModel):
+    """The current editable prompt and its file-backed index metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: PromptStage
+    name: str
+    system_prompt: str
+    user_template: str
+    contract_version: int = 1
+    prompt_hash: str
+    current_file: str
+    current_path: str
+    origin: Literal["bundled", "user"]
+    updated_at: str
 
 
 class PromptSnapshot(BaseModel):

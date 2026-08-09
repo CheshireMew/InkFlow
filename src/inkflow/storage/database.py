@@ -32,7 +32,7 @@ class Database:
             version = connection.scalar(
                 text("SELECT value FROM schema_meta WHERE key='schema_version'")
             )
-            if version != "3":
+            if version != "6":
                 raise RuntimeError(f"unsupported InkFlow schema version after upgrade: {version}")
 
     def session(self) -> Session:

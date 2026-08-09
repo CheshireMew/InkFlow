@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
-from inkflow.providers.base import ProviderCapabilities, ProviderError, ProviderResponse
+from inkflow.providers.base import (
+    ProviderCapabilities,
+    ProviderError,
+    ProviderResponse,
+    openai_strict_schema,
+)
+from inkflow.providers.http_boundary import post_json
 
 
 class OpenAICompatibleProvider:
     name = "openai-compatible-chat"
-    capabilities = ProviderCapabilities(web_search=False, structured_output=False)
+    capabilities = ProviderCapabilities(web_search=False, structured_output=True)
 
     def __init__(
         self,
@@ -24,10 +28,19 @@ class OpenAICompatibleProvider:
         self.api_key = api_key
         self.model = model
         self.parameters = parameters or {}
+        reserved = {"model", "messages", "stream", "response_format"}
+        if reserved & self.parameters.keys():
+            names = ", ".join(sorted(reserved & self.parameters.keys()))
+            raise ValueError(f"provider parameters cannot override protocol fields: {names}")
         self.timeout_seconds = timeout_seconds
 
     async def complete(
-        self, *, system: str, user: str, use_web_search: bool = False
+        self,
+        *,
+        system: str,
+        user: str,
+        response_schema: dict[str, Any],
+        use_web_search: bool = False,
     ) -> ProviderResponse:
         if use_web_search:
             raise ProviderError(self.name, "unsupported capability", "web search is not available")
@@ -38,19 +51,23 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "inkflow_result",
+                    "strict": True,
+                    "schema": openai_strict_schema(response_schema),
+                },
+            },
             **self.parameters,
         }
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(
-                    self.base_url + "/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPError as exc:
-            raise ProviderError(self.name, "http error", str(exc)) from exc
+        data, request_id = await post_json(
+            provider=self.name,
+            url=self.base_url + "/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            payload=payload,
+            timeout_seconds=self.timeout_seconds,
+        )
         choices = data.get("choices") or []
         if not choices:
             raise ProviderError(self.name, "empty response", "provider returned no choices")
@@ -61,4 +78,6 @@ class OpenAICompatibleProvider:
             provider=self.name,
             model=self.model,
             usage=data.get("usage") or {},
+            request_id=request_id,
+            finish_reason=str(choices[0].get("finish_reason") or "") or None,
         )

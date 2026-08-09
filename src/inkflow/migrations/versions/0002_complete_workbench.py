@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 import sqlalchemy as sa
 from alembic import op
-
-from inkflow.domain import PromptStage, stable_hash
-from inkflow.prompt_entities import default_bundled_prompts
-from inkflow.prompting import prompt_hash
 
 revision = "0002_complete_workbench"
 down_revision = "0001_initial"
 branch_labels = None
 depends_on = None
 
-BUNDLED_PROMPTS = default_bundled_prompts()
-DEFAULT_PROMPT_IDS = {stage: prompt.id for stage, prompt in BUNDLED_PROMPTS.items()}
+FROZEN_PROMPTS = json.loads(
+    (Path(__file__).parents[1] / "frozen" / "0002_bundled_prompts.json").read_text(
+        encoding="utf-8"
+    )
+)
+DEFAULT_PROMPT_IDS = {
+    stage: str(prompt["id"]) for stage, prompt in FROZEN_PROMPTS.items()
+}
 
 
 def upgrade() -> None:
@@ -53,17 +57,17 @@ def _create_and_seed_prompts() -> None:
     op.create_index("ix_prompt_revisions_prompt_hash", "prompt_revisions", ["prompt_hash"])
     op.create_index("ix_prompt_revisions_active", "prompt_revisions", ["active"])
     rows = []
-    for stage, default in BUNDLED_PROMPTS.items():
+    for stage, default in FROZEN_PROMPTS.items():
         rows.append(
             {
                 "id": DEFAULT_PROMPT_IDS[stage],
-                "stage": stage.value,
-                "name": default.name,
+                "stage": stage,
+                "name": default["name"],
                 "revision": 1,
-                "system_prompt": default.system_prompt,
-                "user_template": default.user_template,
-                "contract_version": default.contract_version,
-                "prompt_hash": prompt_hash(stage, default.system_prompt, default.user_template),
+                "system_prompt": default["system_prompt"],
+                "user_template": default["user_template"],
+                "contract_version": default["contract_version"],
+                "prompt_hash": _prompt_hash(stage, default),
                 "active": True,
                 "created_at": "2026-08-08T00:00:00.000+00:00",
             }
@@ -90,7 +94,7 @@ def _upgrade_provider_profiles() -> None:
         )
     ).mappings()
     for row in rows:
-        config_hash = stable_hash(
+        config_hash = _stable_hash(
             {
                 "name": row["name"],
                 "revision": row["revision"],
@@ -108,7 +112,7 @@ def _upgrade_provider_profiles() -> None:
 
 
 def _upgrade_experiments() -> None:
-    default_id = DEFAULT_PROMPT_IDS[PromptStage.GENERATE]
+    default_id = DEFAULT_PROMPT_IDS["generate"]
     with op.batch_alter_table("experiments") as batch:
         batch.add_column(
             sa.Column(
@@ -224,3 +228,21 @@ def _upgrade_generations() -> None:
 def downgrade() -> None:
     # InkFlow never performs destructive automatic downgrades.
     pass
+
+
+def _prompt_hash(stage: str, prompt: dict[str, object]) -> str:
+    return _stable_hash(
+        {
+            "stage": stage,
+            "system_prompt": prompt["system_prompt"],
+            "user_template": prompt["user_template"],
+            "contract_version": prompt["contract_version"],
+        }
+    )
+
+
+def _stable_hash(value: object) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

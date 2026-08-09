@@ -11,7 +11,7 @@ from inkflow.resources import prompt_files
 
 
 class PromptEntity(BaseModel):
-    """A human-editable, immutable prompt revision stored as one physical file."""
+    """A bundled prompt asset, including source-history metadata when available."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -25,6 +25,18 @@ class PromptEntity(BaseModel):
     revision: int | None = None
     default_active: bool = False
     source: dict[str, Any] = Field(default_factory=dict)
+
+
+class CurrentPromptFile(BaseModel):
+    """The single user-editable prompt document for one runtime stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
+    stage: PromptStage
+    name: str
+    system_prompt: str
+    user_template: str
 
 
 class OperationalPrompt(BaseModel):
@@ -86,6 +98,14 @@ def read_prompt_entity(path: Path) -> PromptEntity:
     return PromptEntity.model_validate(payload)
 
 
+def read_current_prompt(path: Path) -> CurrentPromptFile:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read current prompt file {path}: {exc}") from exc
+    return CurrentPromptFile.model_validate(payload)
+
+
 def read_operational_prompt(name: str) -> OperationalPrompt:
     path = prompt_files() / "operations" / name
     try:
@@ -110,7 +130,7 @@ def bundled_specialized_prompts() -> list[tuple[Path, SpecializedPromptEntity]]:
 
 
 def write_prompt_entity(path: Path, entity: PromptEntity) -> None:
-    """Create an entity file once. Existing prompt revisions are never overwritten."""
+    """Create a bundled asset once without overwriting source-history material."""
 
     encoded = json.dumps(entity.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
     if path.exists():
@@ -123,10 +143,10 @@ def write_prompt_entity(path: Path, entity: PromptEntity) -> None:
     temporary.replace(path)
 
 
-def write_editable_prompt(path: Path, entity: PromptEntity) -> None:
-    """Refresh the one user-editable working file for a stage after preserving its revision."""
+def write_current_prompt(path: Path, prompt: CurrentPromptFile) -> None:
+    """Atomically replace the one canonical prompt document for a stage."""
 
-    encoded = json.dumps(entity.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
+    encoded = json.dumps(prompt.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n"
     if path.exists() and path.read_text(encoding="utf-8-sig") == encoded:
         return
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -5,6 +5,7 @@ export type Project = {
   id: string
   title: string
   user_request: string
+  input_revision: number
   created_at: string
   updated_at: string
 }
@@ -43,7 +44,7 @@ export type Experiment = {
   handoff_id: string
   kind: 'single' | 'batch_five' | 'compare_rules'
   executor: Executor
-  fixed_input_hash: string
+  input_package_hash: string
   status: string
   created_at: string
   completed_at?: string | null
@@ -84,20 +85,21 @@ export type WritingRule = {
   active: boolean
 }
 
-export type PromptRevision = {
-  id: string
+export type Prompt = {
   stage: PromptStage
   name: string
-  revision: number
   system_prompt: string
   user_template: string
   prompt_hash: string
-  entity_file: string
-  entity_path: string
-  editable_file: string | null
-  origin: 'bundled' | 'user' | 'migrated'
+  current_file: string
+  current_path: string
+  origin: 'bundled' | 'user'
+  updated_at: string
+}
+
+export type ProjectActivity = {
   active: boolean
-  created_at: string
+  state_token: string
 }
 
 export type ProviderProfile = {
@@ -137,7 +139,11 @@ export type Generation = {
   model_content: string
   current_content: string
   edit_revision: number
-  selected: boolean
+  review_state: 'unreviewed' | 'accepted' | 'rejected'
+  executor: Executor
+  controlled: boolean
+  runtime_fingerprint: string
+  runtime_label: string
   executor_metadata: Record<string, unknown>
   prompt_snapshot: Record<string, unknown>
   provider_snapshot: Record<string, unknown>
@@ -157,7 +163,7 @@ export type ExperimentDetail = {
     status: string
     writing_rule_id: string
     writing_rule_hash: string
-    result?: Generation
+    results: Generation[]
   }>
 }
 

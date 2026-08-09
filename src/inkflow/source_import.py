@@ -5,6 +5,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
+
 
 class _VisibleTextParser(HTMLParser):
     def __init__(self) -> None:
@@ -38,28 +40,38 @@ def extract_url(url: str, *, timeout_seconds: float = 20) -> tuple[str, dict[str
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("source URL must be an absolute http or https URL")
     try:
-        response = httpx.get(
+        with httpx.stream(
+            "GET",
             url,
             follow_redirects=True,
             timeout=timeout_seconds,
             headers={"User-Agent": "InkFlow (+local writing workbench)"},
-        )
-        response.raise_for_status()
+        ) as response:
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            resolved_url = str(response.url)
+            payload = bytearray()
+            for chunk in response.iter_bytes():
+                if len(payload) + len(chunk) > MAX_SOURCE_BYTES:
+                    raise ValueError(
+                        f"source URL exceeds the {MAX_SOURCE_BYTES}-byte response limit"
+                    )
+                payload.extend(chunk)
+            decoded = bytes(payload).decode(response.encoding or "utf-8", errors="replace")
     except httpx.HTTPError as exc:
         raise ValueError(f"unable to read source URL: {exc}") from exc
-    content_type = response.headers.get("content-type", "").lower()
     if "html" in content_type:
         parser = _VisibleTextParser()
-        parser.feed(response.text)
+        parser.feed(decoded)
         content = parser.text()
     elif content_type.startswith("text/") or not content_type:
-        content = response.text.strip()
+        content = decoded.strip()
     else:
         raise ValueError(f"source URL returned unsupported content type: {content_type}")
     if not content:
         raise ValueError("source URL did not contain readable text")
     return content, {
         "url": url,
-        "resolved_url": str(response.url),
+        "resolved_url": resolved_url,
         "content_type": content_type,
     }

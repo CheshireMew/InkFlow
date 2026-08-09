@@ -2,6 +2,7 @@ import { ArrowRight, FilePlus2, FolderOpen, WandSparkles } from 'lucide-react'
 import { useState } from 'react'
 import { api } from '../api/client'
 import type { Project } from '../types'
+import { confirmDiscardUnsavedChanges, markEditorSaved, useUnsavedChanges } from '../unsavedChanges'
 
 type Props = {
   projects: Project[]
@@ -16,6 +17,12 @@ export function HomeView({ projects, createOpen, onCreateOpen, onCreated, onProj
   const [title, setTitle] = useState('')
   const [request, setRequest] = useState('')
   const [material, setMaterial] = useState('')
+  const dirty = createOpen && Boolean(title.trim() || request.trim() || material.trim())
+  useUnsavedChanges('new-project', dirty)
+  const closeCreate = () => {
+    if (!confirmDiscardUnsavedChanges()) return
+    setTitle(''); setRequest(''); setMaterial(''); onCreateOpen(false)
+  }
 
   const create = async () => {
     let createdId = ''
@@ -24,6 +31,7 @@ export function HomeView({ projects, createOpen, onCreateOpen, onCreated, onProj
       createdId = result.project_id
     }, '项目已创建')
     if (createdId) {
+      markEditorSaved('new-project')
       setTitle(''); setRequest(''); setMaterial(''); onCreateOpen(false); onCreated(createdId)
     }
   }
@@ -34,7 +42,7 @@ export function HomeView({ projects, createOpen, onCreateOpen, onCreated, onProj
       <button className="button primary large" onClick={() => onCreateOpen(true)}><FilePlus2 size={18} />新建写作项目</button>
     </header>
     {createOpen && <section className="sheet create-sheet">
-      <div className="sheet-heading"><div><span className="step-number">01</span><h2>先说清楚这次要写什么</h2></div><button className="text-button" onClick={() => onCreateOpen(false)}>收起</button></div>
+      <div className="sheet-heading"><div><span className="step-number">01</span><h2>先说清楚这次要写什么</h2></div><button className="text-button" onClick={closeCreate}>收起</button></div>
       <div className="form-grid two"><label>项目名称<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例如：X 原创内容奖励计划" /></label><label className="span-2">原始写作要求<textarea rows={4} value={request} onChange={(e) => setRequest(e.target.value)} placeholder="原样记录你的要求，不自动改写。" /></label><label className="span-2">第一份材料（可稍后补充）<textarea rows={7} value={material} onChange={(e) => setMaterial(e.target.value)} placeholder="粘贴原文、会议记录或研究材料……" /></label></div>
       <div className="sheet-actions"><p>写作要求将作为项目真源，修改后需要重新准备交接。</p><button className="button primary" disabled={!title.trim() || !request.trim()} onClick={create}><WandSparkles size={16} />建立工作区</button></div>
     </section>}

@@ -16,6 +16,7 @@ class ProjectRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str] = mapped_column(String(240))
     user_request: Mapped[str] = mapped_column(Text)
+    input_revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[str] = mapped_column(String(40))
     updated_at: Mapped[str] = mapped_column(String(40))
 
@@ -62,22 +63,16 @@ class WritingRuleRow(Base):
     created_at: Mapped[str] = mapped_column(String(40))
 
 
-class PromptRevisionRow(Base):
-    __tablename__ = "prompt_revisions"
-    __table_args__ = (UniqueConstraint("stage", "revision", name="uq_prompt_stage_revision"),)
+class PromptRow(Base):
+    __tablename__ = "prompts"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    stage: Mapped[str] = mapped_column(String(40), index=True)
-    name: Mapped[str] = mapped_column(String(200))
-    revision: Mapped[int] = mapped_column(Integer)
-    system_prompt: Mapped[str] = mapped_column(Text)
-    user_template: Mapped[str] = mapped_column(Text)
+    stage: Mapped[str] = mapped_column(String(40), primary_key=True)
+    current_file: Mapped[str] = mapped_column(Text, unique=True)
     contract_version: Mapped[int] = mapped_column(Integer, default=1)
+    document_hash: Mapped[str] = mapped_column(String(64), index=True)
     prompt_hash: Mapped[str] = mapped_column(String(64), index=True)
-    entity_file: Mapped[str] = mapped_column(Text)
     origin: Mapped[str] = mapped_column(String(20), index=True)
-    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    created_at: Mapped[str] = mapped_column(String(40))
+    updated_at: Mapped[str] = mapped_column(String(40))
 
 
 class HandoffRow(Base):
@@ -89,6 +84,7 @@ class HandoffRow(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     revision: Mapped[int] = mapped_column(Integer)
+    project_input_revision: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), index=True)
     user_request: Mapped[str] = mapped_column(Text)
     purified_material: Mapped[str] = mapped_column(Text)
@@ -133,11 +129,10 @@ class ExperimentRow(Base):
     provider_profile_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("provider_profiles.id"), nullable=True
     )
-    prompt_revision_id: Mapped[str] = mapped_column(ForeignKey("prompt_revisions.id"))
     prompt_snapshot_json: Mapped[str] = mapped_column(Text)
     provider_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
     generation_settings_json: Mapped[str] = mapped_column(Text, default="{}")
-    fixed_input_hash: Mapped[str] = mapped_column(String(64))
+    input_package_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), index=True)
     created_at: Mapped[str] = mapped_column(String(40))
     completed_at: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
@@ -221,7 +216,7 @@ class GenerationRow(Base):
     prompt_snapshot_json: Mapped[str] = mapped_column(Text)
     provider_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
     generation_settings_json: Mapped[str] = mapped_column(Text, default="{}")
-    selected: Mapped[bool] = mapped_column(Boolean, default=False)
+    review_state: Mapped[str] = mapped_column(String(20), default="unreviewed", index=True)
     created_at: Mapped[str] = mapped_column(String(40))
 
 

@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
-from inkflow.providers.base import ProviderCapabilities, ProviderError, ProviderResponse
+from inkflow.providers.base import (
+    ProviderCapabilities,
+    ProviderError,
+    ProviderResponse,
+    openai_strict_schema,
+)
+from inkflow.providers.http_boundary import post_json
 
 
 class OpenAIResponsesProvider:
     name = "openai-responses"
-    capabilities = ProviderCapabilities(web_search=True, structured_output=False)
+    capabilities = ProviderCapabilities(web_search=True, structured_output=True)
 
     def __init__(
         self,
@@ -24,30 +28,43 @@ class OpenAIResponsesProvider:
         self.api_key = api_key
         self.model = model
         self.parameters = parameters or {}
+        reserved = {"model", "instructions", "input", "text", "tools"}
+        if reserved & self.parameters.keys():
+            names = ", ".join(sorted(reserved & self.parameters.keys()))
+            raise ValueError(f"provider parameters cannot override protocol fields: {names}")
         self.timeout_seconds = timeout_seconds
 
     async def complete(
-        self, *, system: str, user: str, use_web_search: bool = False
+        self,
+        *,
+        system: str,
+        user: str,
+        response_schema: dict[str, Any],
+        use_web_search: bool = False,
     ) -> ProviderResponse:
         payload: dict[str, Any] = {
             "model": self.model,
             "instructions": system,
             "input": user,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "inkflow_result",
+                    "strict": True,
+                    "schema": openai_strict_schema(response_schema),
+                }
+            },
             **self.parameters,
         }
         if use_web_search:
             payload["tools"] = [{"type": "web_search"}]
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(
-                    self.base_url + "/responses",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-        except httpx.HTTPError as exc:
-            raise ProviderError(self.name, "http error", str(exc)) from exc
+        data, request_id = await post_json(
+            provider=self.name,
+            url=self.base_url + "/responses",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            payload=payload,
+            timeout_seconds=self.timeout_seconds,
+        )
         content = str(data.get("output_text") or "").strip()
         if not content:
             content = _extract_output_text(data)
@@ -59,6 +76,8 @@ class OpenAIResponsesProvider:
             provider=self.name,
             model=self.model,
             usage=data.get("usage") or {},
+            request_id=request_id,
+            finish_reason=str(data.get("status") or "") or None,
         )
 
 

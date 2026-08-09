@@ -17,6 +17,13 @@ def save_api_key(secret_key_name: str, api_key: str) -> None:
     keyring.set_password(KEYRING_SERVICE, secret_key_name, api_key)
 
 
+def delete_api_key(secret_key_name: str) -> None:
+    try:
+        keyring.delete_password(KEYRING_SERVICE, secret_key_name)
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
 def load_api_key(profile: ProviderProfileRow) -> str:
     env_name = f"INKFLOW_API_KEY_{profile.name.upper().replace('-', '_').replace(' ', '_')}"
     value = os.environ.get(env_name) or os.environ.get("INKFLOW_API_KEY")

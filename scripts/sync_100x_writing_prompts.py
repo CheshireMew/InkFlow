@@ -7,6 +7,24 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+GENERATION_RUNTIME_CONTRACT = """# 成品生成运行合同
+
+你只负责根据用户消息中的已批准交接生成成品。上游已经完成材料发现、净化、参考选择和交接审阅；不要重新执行这些流程，不要创建或解释交接文件，也不要讨论实验、维护或提示词设计。
+
+用户消息中的【写作规则】是本次唯一创作方法。系统提示词不提供第二套风格、结构或措辞规则。严格遵守【本次写作要求】，只使用【净化后材料】和【其它实际写作输入】提供当前对象的事实、身份、经历和立场。未提供作者身份或亲历时，不虚构第一人称经历、朋友故事、测试结果、性能、收益或持仓。
+
+【参考写作案例】和【参考开头钩子】只帮助理解写法，不能提供当前对象的事实、人物、经历、立场或作者身份。不要复述参考过程，不要把案例内容迁移到当前对象。
+
+直接返回用户要求的完整成品。除非【本次写作要求】明确要求方案、解释或多个候选，否则不要输出写作方案、内部分析、评审、免责声明或额外说明。不要自动评审、融合、润色或重试。"""
+
+
+DISCOVERED_SOURCE_CONTRACT = """## 外部来源输出合同
+
+`discovered_sources` 只记录实际为净化材料新增内容的外部来源。
+每项必须同时提供 `title`、`url`、`content` 和 `use`。
+`content` 是本次实际采用且保留必要上下文的来源原文，`use` 说明它补充了什么。
+只打开但没有贡献新内容的来源不要返回。没有采用外部新内容时返回空数组。"""
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -43,7 +61,12 @@ def main() -> None:
     natural_writing = _read(source / "references" / "natural-writing.md")
     content_audit = _read(source / "references" / "content-audit.md")
 
-    prepare_system = "你只负责准备正式交接材料，不写成品。\n\n" + prewriting
+    prepare_system = (
+        "你只负责准备正式交接材料，不写成品。\n\n"
+        + prewriting
+        + "\n\n"
+        + DISCOVERED_SOURCE_CONTRACT
+    )
     prepare_template = "用户明确要求：\n{{user_request}}\n\n原始材料：\n{{materials}}"
     _write_json(
         output / "seeds" / "runtime" / "prepare-material-current.prompt.json",
@@ -90,19 +113,19 @@ def main() -> None:
         output / "seeds" / "runtime" / "generate-current.prompt.json",
         _entity(
             prompt_id=_prompt_id(
-                "prompt-builtin-generate", "generate", general_writing, "{{execution_package}}"
+                "prompt-builtin-generate",
+                "generate",
+                GENERATION_RUNTIME_CONTRACT,
+                "{{execution_package}}",
             ),
             stage="generate",
-            name="100x 当前通用成文与自然表达",
-            system_prompt=general_writing,
+            name="成品生成运行合同",
+            system_prompt=GENERATION_RUNTIME_CONTRACT,
             user_template="{{execution_package}}",
             default_active=True,
             source={
-                "kind": "composed-general-writing",
-                "paths": [
-                    "100x-learning/references/content-writing.md",
-                    "src/inkflow/prompt_files/components/general-writing-naturalness.txt",
-                ],
+                "kind": "inkflow-runtime-contract",
+                "creative_rule_source": "writing_rules.body",
             },
         ),
     )

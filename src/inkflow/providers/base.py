@@ -17,6 +17,8 @@ class ProviderResponse:
     provider: str
     model: str
     usage: dict[str, Any] = field(default_factory=dict)
+    request_id: str | None = None
+    finish_reason: str | None = None
 
 
 class ModelProvider(Protocol):
@@ -25,7 +27,12 @@ class ModelProvider(Protocol):
     capabilities: ProviderCapabilities
 
     async def complete(
-        self, *, system: str, user: str, use_web_search: bool = False
+        self,
+        *,
+        system: str,
+        user: str,
+        response_schema: dict[str, Any],
+        use_web_search: bool = False,
     ) -> ProviderResponse: ...
 
 
@@ -35,3 +42,23 @@ class ProviderError(RuntimeError):
         self.provider = provider
         self.kind = kind
         self.message = message
+
+
+def openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {
+            key: normalize(item)
+            for key, item in value.items()
+            if key not in {"default"}
+        }
+        properties = result.get("properties")
+        if result.get("type") == "object" and isinstance(properties, dict):
+            result["additionalProperties"] = False
+            result["required"] = list(properties)
+        return result
+
+    return normalize(schema)

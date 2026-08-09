@@ -1,5 +1,5 @@
 import { LoaderCircle } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api/client'
 import { AppShell } from './components/AppShell'
 import type { Project, ProjectStage, ViewId } from './types'
@@ -8,6 +8,7 @@ import { LibraryView } from './views/LibraryView'
 import { ProjectView } from './views/ProjectView'
 import { PromptStudio } from './views/PromptStudio'
 import { ProviderView } from './views/ProviderView'
+import { confirmDiscardUnsavedChanges } from './unsavedChanges'
 
 type Notice = { kind: 'ok' | 'error'; text: string } | null
 
@@ -20,11 +21,24 @@ export default function App() {
   const [createOpen, setCreateOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<Notice>(null)
+  const [projectLoadError, setProjectLoadError] = useState<string | null>(null)
+  const busyRef = useRef(false)
+  const currentHash = useRef(window.location.hash)
 
-  const reloadProjects = useCallback(async () => setProjects(await api.projects()), [])
-  useEffect(() => { void reloadProjects() }, [reloadProjects])
+  const reloadProjects = useCallback(async () => {
+    setProjects(await api.projects())
+    setProjectLoadError(null)
+  }, [])
+  useEffect(() => {
+    void reloadProjects().catch((error) => setProjectLoadError(error instanceof Error ? error.message : '项目列表读取失败'))
+  }, [reloadProjects])
   useEffect(() => {
     const restore = () => {
+      if (!confirmDiscardUnsavedChanges()) {
+        window.history.replaceState(null, '', currentHash.current || '#/projects')
+        return
+      }
+      currentHash.current = window.location.hash
       const route = readRoute()
       setView(route.view); setProjectId(route.projectId); setProjectStage(route.stage)
     }
@@ -38,24 +52,38 @@ export default function App() {
   }, [notice])
 
   const perform = useCallback(async (action: () => Promise<unknown>, message: string) => {
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try {
       await action()
-      await reloadProjects()
+      try {
+        await reloadProjects()
+      } catch (error) {
+        setProjectLoadError(error instanceof Error ? error.message : '项目列表刷新失败')
+      }
       setNotice({ kind: 'ok', text: message })
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : '操作失败' })
       throw error
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }, [reloadProjects])
 
-  const openProject = (id: string, stage: ProjectStage = 'inputs') => { window.location.hash = `/project/${id}/${stage}` }
-  const navigate = (next: ViewId) => { window.location.hash = `/${next}` }
+  const changeRoute = (hash: string): boolean => {
+    if (!confirmDiscardUnsavedChanges()) return false
+    currentHash.current = `#${hash}`
+    window.location.hash = hash
+    return true
+  }
+  const openProject = (id: string, stage: ProjectStage = 'inputs') => changeRoute(`/project/${id}/${stage}`)
+  const navigate = (next: ViewId) => changeRoute(`/${next}`)
   const changeProjectStage = (stage: ProjectStage) => { if (projectId) openProject(projectId, stage) }
 
-  return <AppShell projects={projects} view={view} selectedProjectId={projectId} onNavigate={navigate} onProject={openProject} onNewProject={() => { setView('projects'); setCreateOpen(true) }}>
+  return <AppShell busy={busy} projects={projects} view={view} selectedProjectId={projectId} onNavigate={navigate} onProject={openProject} onNewProject={() => { if (changeRoute('/projects')) setCreateOpen(true) }}>
+    {projectLoadError && <div className="load-error" role="alert"><span>项目列表读取失败：{projectLoadError}</span><button className="button secondary small" onClick={() => void reloadProjects().catch((error) => setProjectLoadError(error instanceof Error ? error.message : '项目列表读取失败'))}>重试</button></div>}
     {view === 'projects' && <HomeView projects={projects} createOpen={createOpen} onCreateOpen={setCreateOpen} onCreated={openProject} onProject={openProject} perform={perform} />}
     {view === 'prompts' && <PromptStudio perform={perform} />}
     {view === 'library' && <LibraryView perform={perform} />}

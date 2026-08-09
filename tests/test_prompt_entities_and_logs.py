@@ -68,22 +68,18 @@ def test_every_bundled_prompt_is_a_physical_entity_with_complete_github_history(
         for entity in entities
         if entity.stage == PromptStage.GENERATE and entity.default_active
     )
-    component = (
-        (
-            Path(__file__).parents[1]
-            / "src"
-            / "inkflow"
-            / "prompt_files"
-            / "components"
-            / "general-writing-naturalness.txt"
-        )
-        .read_text(encoding="utf-8-sig")
-        .rstrip()
-    )
-    assert general.system_prompt.endswith(component)
-    assert "同一意思说清一次即可" in general.system_prompt
-    assert "不虚构个人体验或假装在场" in general.system_prompt
-    assert "# AI 味审查与清理" not in general.system_prompt
+    assert general.source == {
+        "kind": "inkflow-runtime-contract",
+        "creative_rule_source": "writing_rules.body",
+    }
+    assert "【写作规则】是本次唯一创作方法" in general.system_prompt
+    assert "writing-handoff.md" not in general.system_prompt
+    assert "自然表达原则" not in general.system_prompt
+    assert "第一轮" not in general.system_prompt
+    sync_path = Path(__file__).parents[1] / "scripts" / "sync_100x_writing_prompts.py"
+    sync_script = sync_path.read_text(encoding="utf-8-sig")
+    assert "system_prompt=GENERATION_RUNTIME_CONTRACT" in sync_script
+    assert '"creative_rule_source": "writing_rules.body"' in sync_script
 
 
 def test_all_current_and_historical_ai_flavor_prompts_are_physical() -> None:
@@ -150,56 +146,62 @@ def test_all_current_and_historical_ai_flavor_prompts_are_physical() -> None:
     assert "{{draft}}" in combined.user_template
 
 
-def test_manual_edit_of_current_file_becomes_a_new_active_revision(tmp_path: Path) -> None:
+def test_manual_edit_overwrites_the_single_current_prompt(tmp_path: Path) -> None:
     service = make_service(tmp_path)
-    original = service.prompts.get(stage=PromptStage.PREPARE_MATERIAL)
-    original_path = Path(service.prompts.entity_path(original))
-    original_bytes = original_path.read_bytes()
-    editable_path = Path(service.prompts.editable_file(original) or "")
-    payload = json.loads(editable_path.read_text(encoding="utf-8"))
+    original = service.prompts.get(PromptStage.PREPARE_MATERIAL)
+    current_path = Path(original.current_path)
+    payload = json.loads(current_path.read_text(encoding="utf-8"))
     payload["name"] = "用户手动修改的材料提示词"
     payload["system_prompt"] = "只保留用户要求需要的原始材料。"
-    editable_path.write_text(
+    current_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
-    revised = service.prompts.get(stage=PromptStage.PREPARE_MATERIAL)
-    assert revised.id != original.id
-    assert revised.revision > original.revision
+    revised = service.prompts.get(PromptStage.PREPARE_MATERIAL)
+    assert revised.prompt_hash != original.prompt_hash
     assert revised.origin == "user"
     assert revised.name == "用户手动修改的材料提示词"
     assert revised.system_prompt == "只保留用户要求需要的原始材料。"
-    assert original_path.read_bytes() == original_bytes
-    canonical = json.loads(editable_path.read_text(encoding="utf-8"))
-    assert canonical["id"] == revised.id
-    assert canonical["revision"] == revised.revision
-    assert canonical["source"]["kind"] == "user-manual-file-edit"
+    assert revised.current_path == original.current_path
+    canonical = json.loads(current_path.read_text(encoding="utf-8"))
+    assert canonical["schema_version"] == 2
+    assert not {"id", "revision", "active", "default_active"} & canonical.keys()
+    assert len(service.prompts.list(PromptStage.PREPARE_MATERIAL)) == 1
 
 
-def test_user_prompt_save_creates_new_entity_and_tampering_is_rejected(tmp_path: Path) -> None:
+def test_user_prompt_save_overwrites_current_and_ai_uses_a_read_only_snapshot(
+    tmp_path: Path,
+) -> None:
     service = make_service(tmp_path)
-    row = service.add_prompt(
+    current = service.prompts.save(
         stage=PromptStage.PREPARE_MATERIAL,
-        name="用户明确保存的版本",
+        name="用户当前材料提示词",
         system_prompt="只按用户确认的要求准备材料。",
         user_template="要求：{{user_request}}\n材料：{{materials}}",
-        activate=True,
     )
-    path = (service.prompts.root / row.entity_file).resolve()
-    editable_path = Path(service.prompts.editable_file(row) or "")
+    path = Path(current.current_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["source"] == {"kind": "user"}
     assert payload["system_prompt"] == "只按用户确认的要求准备材料。"
 
-    before_model_run = path.read_bytes()
-    editable_before_model_run = editable_path.read_bytes()
-    project_id = service.create_project(
+    project_id = service.project_inputs.create_project(
         title="AI 只读提示词", user_request="准备", materials=[("", "原材料")]
     )
-    service.start_preparation(project_id, executor=ExecutorKind.EXTERNAL)
-    envelope = service.lease_external_job(project_id)
+    service.jobs.start_preparation(project_id, executor=ExecutorKind.EXTERNAL)
+    envelope = service.jobs.lease_external(project_id)
     assert envelope is not None
-    service.submit_job_result(
+    snapshot = envelope.payload["prompt_snapshot"]
+    assert snapshot["definition"]["prompt_hash"] == current.prompt_hash
+    assert snapshot["definition"]["system_prompt"] == "只按用户确认的要求准备材料。"
+
+    replacement = service.prompts.save(
+        stage=PromptStage.PREPARE_MATERIAL,
+        name="后来覆盖的当前提示词",
+        system_prompt="后来只保留必要事实。",
+        user_template="要求：{{user_request}}\n材料：{{materials}}",
+    )
+    before_model_run = path.read_bytes()
+    assert replacement.prompt_hash != current.prompt_hash
+    service.jobs.submit_result(
         envelope.job_id,
         attempt_id=envelope.attempt_id,
         lease_token=envelope.lease_token,
@@ -209,31 +211,29 @@ def test_user_prompt_save_creates_new_entity_and_tampering_is_rejected(tmp_path:
         ),
     )
     assert path.read_bytes() == before_model_run
-    assert editable_path.read_bytes() == editable_before_model_run
-
-    payload["system_prompt"] = "未经用户确认的修改"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="differs from immutable database index"):
-        service.prompts.get(row.id)
+    assert envelope.payload["prompt_snapshot"] == snapshot
 
 
 def test_external_ai_boundary_logs_full_request_and_response(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     service = make_service(tmp_path)
-    project_id = service.create_project(
+    project_id = service.project_inputs.create_project(
         title="完整日志",
         user_request="保留这一条完整要求",
         materials=[("", "保留这一段完整材料")],
     )
-    service.start_preparation(project_id, executor=ExecutorKind.EXTERNAL)
-    envelope = service.lease_external_job(project_id)
+    service.jobs.start_preparation(project_id, executor=ExecutorKind.EXTERNAL)
+    envelope = service.jobs.lease_external(project_id)
     assert envelope is not None
     request_log = capfd.readouterr().err
     snapshot = envelope.payload["prompt_snapshot"]
-    assert snapshot["system_prompt"] in request_log
-    assert snapshot["user_prompt"] in request_log
-    assert "AI REQUEST BEGIN" in request_log and "AI REQUEST END" in request_log
+    request_event = json.loads(request_log)
+    assert request_event["event"] == "request"
+    assert request_event["component"] == "inkflow.ai"
+    assert request_event["system_prompt"] == snapshot["system_prompt"]
+    assert request_event["user_prompt"] == snapshot["user_prompt"]
+    assert request_event["response_schema"] == envelope.payload["result_schema"]
 
     raw_response = json.dumps(
         {
@@ -243,12 +243,21 @@ def test_external_ai_boundary_logs_full_request_and_response(
         },
         ensure_ascii=False,
     )
-    service.submit_job_result(
+    service.jobs.submit_result(
         envelope.job_id,
         attempt_id=envelope.attempt_id,
         lease_token=envelope.lease_token,
         raw_response=raw_response,
     )
     response_log = capfd.readouterr().err
-    assert raw_response in response_log
-    assert "AI RESPONSE BEGIN" in response_log and "AI RESPONSE END" in response_log
+    response_event = json.loads(response_log)
+    assert response_event["event"] == "response"
+    assert response_event["result"] == "submitted"
+    assert response_event["raw_response"] == raw_response
+    persisted = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "ai-interactions.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert [event["event"] for event in persisted] == ["request", "response"]

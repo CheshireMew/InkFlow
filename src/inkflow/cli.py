@@ -4,12 +4,13 @@ import asyncio
 import json
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from inkflow.domain import ExecutorKind, HandoffCore, PromptStage, ReferenceKind
+from inkflow.domain import ExecutorKind, HandoffCore, PromptStage, ReferenceKind, ReviewState
 from inkflow.paths import AppPaths
 from inkflow.resources import frontend_dist
 from inkflow.serialization import row_dict
@@ -23,7 +24,7 @@ prepare_app = typer.Typer(help="写作准备")
 job_app = typer.Typer(help="外部执行任务")
 handoff_app = typer.Typer(help="写作交接")
 rule_app = typer.Typer(help="写作规则")
-prompt_app = typer.Typer(help="各环节提示词版本")
+prompt_app = typer.Typer(help="各环节当前提示词")
 generate_app = typer.Typer(help="单篇生成")
 experiment_app = typer.Typer(help="批量与规则对比实验")
 result_app = typer.Typer(help="生成结果")
@@ -51,7 +52,7 @@ def configure(
     data_dir: Path | None = typer.Option(None, "--data-dir", envvar="INKFLOW_DATA_DIR"),
 ) -> None:
     paths = AppPaths.resolve(override_data_dir=data_dir)
-    ctx.obj = {"paths": paths, "service": InkFlowService(Database(paths.database_path))}
+    ctx.obj = {"paths": paths}
 
 
 @app.command()
@@ -69,6 +70,7 @@ def app_server(
     open_browser: bool = typer.Option(True, "--open/--no-open"),
 ) -> None:
     import threading
+    import urllib.request
     import webbrowser
 
     import uvicorn
@@ -76,12 +78,34 @@ def app_server(
     from inkflow.api import create_app
 
     paths: AppPaths = ctx.obj["paths"]
-    actual_port = port or _available_port(host)
+    server_socket = _bind_server_socket(host, port)
+    actual_port = int(server_socket.getsockname()[1])
     url = f"http://{host}:{actual_port}"
     typer.echo(json.dumps({"url": url}, ensure_ascii=False), err=True)
     if open_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    uvicorn.run(create_app(paths.data_dir), host=host, port=actual_port)
+        browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        browser_url = f"http://{browser_host}:{actual_port}"
+
+        def open_when_ready() -> None:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(
+                        f"{browser_url}/api/health", timeout=0.5
+                    ) as response:
+                        if response.status == 200:
+                            webbrowser.open(browser_url)
+                            return
+                except OSError:
+                    time.sleep(0.1)
+
+        threading.Thread(target=open_when_ready, daemon=True).start()
+    config = uvicorn.Config(create_app(paths.data_dir), host=host, port=actual_port)
+    server = uvicorn.Server(config)
+    try:
+        server.run(sockets=[server_socket])
+    finally:
+        server_socket.close()
 
 
 @project_app.command("create")
@@ -97,7 +121,7 @@ def project_create(
     materials: list[tuple[str, str]] = [("", item) for item in material or []]
     for path in material_file or []:
         materials.append((path.name, path.read_text(encoding="utf-8-sig")))
-    project_id = _service(ctx).create_project(
+    project_id = _service(ctx).project_inputs.create_project(
         title=title, user_request=user_request, materials=materials
     )
     _emit({"project_id": project_id})
@@ -144,10 +168,10 @@ def project_add_source(
     if url:
         if text is not None or file is not None:
             raise typer.BadParameter("URL、文本和文件只能选择一种")
-        source_id = _service(ctx).add_url_source(project_id, url)
+        source_id = _service(ctx).project_inputs.add_url_source(project_id, url)
     else:
         content = _text_argument(text, file, "source")
-        source_id = _service(ctx).add_source(
+        source_id = _service(ctx).project_inputs.add_source(
             project_id,
             content=content,
             kind="file" if file else "pasted",
@@ -158,7 +182,7 @@ def project_add_source(
 
 @reference_app.command("import-100x")
 def reference_import_100x(ctx: typer.Context, library_root: Path) -> None:
-    _emit(_service(ctx).import_100x(library_root).as_dict())
+    _emit(_service(ctx).project_inputs.import_100x(library_root).as_dict())
 
 
 @reference_app.command("list")
@@ -181,23 +205,16 @@ def prepare_start(
     ctx: typer.Context,
     project_id: str,
     executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
-    prepare_prompt_id: str | None = typer.Option(None, "--prepare-prompt"),
-    reference_prompt_id: str | None = typer.Option(None, "--reference-prompt"),
     provider_profile_id: str | None = typer.Option(None, "--provider"),
-    run: bool = typer.Option(False, "--run"),
 ) -> None:
     service = _service(ctx)
-    job_id = service.start_preparation(
+    job_id = service.jobs.start_preparation(
         project_id,
         executor=executor,
-        prepare_prompt_id=prepare_prompt_id,
-        reference_prompt_id=reference_prompt_id,
         provider_profile_id=provider_profile_id,
     )
-    if run:
-        if executor is not ExecutorKind.API:
-            raise typer.BadParameter("--run 仅适用于 API 执行器")
-        asyncio.run(service.run_api_jobs(project_id))
+    if executor is ExecutorKind.API:
+        asyncio.run(service.jobs.run_api_jobs(project_id))
     _emit({"job_id": job_id, "executor": executor.value})
 
 
@@ -208,7 +225,7 @@ def job_next(
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     del json_output
-    envelope = _service(ctx).lease_external_job(project_id)
+    envelope = _service(ctx).jobs.lease_external(project_id)
     _emit(envelope.model_dump(mode="json") if envelope else None)
 
 
@@ -222,7 +239,7 @@ def job_submit(
     result_file: Path | None = typer.Option(None, "--result-file"),
 ) -> None:
     raw = _text_argument(result, result_file, "result")
-    _service(ctx).submit_job_result(
+    _service(ctx).jobs.submit_result(
         job_id,
         attempt_id=attempt_id,
         lease_token=lease_token,
@@ -233,7 +250,10 @@ def job_submit(
 
 @job_app.command("retry")
 def job_retry(ctx: typer.Context, job_id: str) -> None:
-    _service(ctx).retry_job(job_id)
+    service = _service(ctx)
+    job = service.jobs.retry(job_id)
+    if job.executor == ExecutorKind.API.value:
+        asyncio.run(service.jobs.run_api_jobs(job.project_id))
     _emit({"job_id": job_id, "status": "pending"})
 
 
@@ -248,7 +268,7 @@ def handoff_show(
         raise typer.BadParameter("--markdown 与 --json 不能同时使用")
     service = _service(ctx)
     if markdown:
-        typer.echo(service.render_handoff(project_id))
+        typer.echo(service.handoffs.render(project_id))
         return
     row = service.workflows.get_handoff(project_id)
     _emit(
@@ -261,7 +281,7 @@ def handoff_show(
 
 @handoff_app.command("approve")
 def handoff_approve(ctx: typer.Context, project_id: str) -> None:
-    _emit(row_dict(_service(ctx).approve_handoff(project_id)))
+    _emit(row_dict(_service(ctx).handoffs.approve(project_id)))
 
 
 @handoff_app.command("revise")
@@ -271,7 +291,7 @@ def handoff_revise(
     file: Path = typer.Option(..., "--file"),
 ) -> None:
     core = HandoffCore.model_validate_json(file.read_text(encoding="utf-8-sig"))
-    _emit(row_dict(_service(ctx).revise_handoff(project_id, core)))
+    _emit(row_dict(_service(ctx).handoffs.revise(project_id, core)))
 
 
 @rule_app.command("add")
@@ -284,7 +304,7 @@ def rule_add(
 ) -> None:
     _emit(
         row_dict(
-            _service(ctx).add_rule(
+            _service(ctx).library.add_rule(
                 name=name, body=_text_argument(text, file, "rule"), activate=activate
             )
         )
@@ -298,7 +318,7 @@ def rule_list(ctx: typer.Context) -> None:
 
 @rule_app.command("activate")
 def rule_activate(ctx: typer.Context, rule_id: str) -> None:
-    _emit(row_dict(_service(ctx).activate_rule(rule_id)))
+    _emit(row_dict(_service(ctx).library.activate_rule(rule_id)))
 
 
 @prompt_app.command("list")
@@ -307,33 +327,25 @@ def prompt_list(
     stage: PromptStage | None = typer.Option(None, "--stage"),
 ) -> None:
     service = _service(ctx)
-    _emit([_prompt_view(service, row) for row in service.prompts.list(stage)])
+    _emit([_prompt_view(prompt) for prompt in service.prompts.list(stage)])
 
 
-@prompt_app.command("add")
-def prompt_add(
+@prompt_app.command("set")
+def prompt_set(
     ctx: typer.Context,
     stage: PromptStage = typer.Option(..., "--stage"),
     name: str = typer.Option(..., "--name"),
     system_file: Path = typer.Option(..., "--system-file"),
     template_file: Path = typer.Option(..., "--template-file"),
-    activate: bool = typer.Option(True, "--activate/--no-activate"),
 ) -> None:
     service = _service(ctx)
-    row = service.add_prompt(
+    row = service.prompts.save(
         stage=stage,
         name=name,
         system_prompt=system_file.read_text(encoding="utf-8-sig"),
         user_template=template_file.read_text(encoding="utf-8-sig"),
-        activate=activate,
     )
-    _emit(_prompt_view(service, row))
-
-
-@prompt_app.command("activate")
-def prompt_activate(ctx: typer.Context, prompt_id: str) -> None:
-    service = _service(ctx)
-    _emit(_prompt_view(service, service.prompts.activate(prompt_id)))
+    _emit(_prompt_view(row))
 
 
 @generate_app.command("start")
@@ -343,8 +355,6 @@ def generate_start(
     executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
     rule_id: str | None = typer.Option(None, "--rule"),
     provider_profile_id: str | None = typer.Option(None, "--provider"),
-    prompt_revision_id: str | None = typer.Option(None, "--prompt"),
-    run: bool = typer.Option(False, "--run"),
 ) -> None:
     _start_generation_command(
         ctx,
@@ -352,9 +362,7 @@ def generate_start(
         executor=executor,
         rule_id=rule_id,
         provider_profile_id=provider_profile_id,
-        prompt_revision_id=prompt_revision_id,
         batch_five=False,
-        run=run,
     )
 
 
@@ -365,8 +373,6 @@ def experiment_batch_five(
     executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
     rule_id: str | None = typer.Option(None, "--rule"),
     provider_profile_id: str | None = typer.Option(None, "--provider"),
-    prompt_revision_id: str | None = typer.Option(None, "--prompt"),
-    run: bool = typer.Option(False, "--run"),
 ) -> None:
     _start_generation_command(
         ctx,
@@ -374,9 +380,7 @@ def experiment_batch_five(
         executor=executor,
         rule_id=rule_id,
         provider_profile_id=provider_profile_id,
-        prompt_revision_id=prompt_revision_id,
         batch_five=True,
-        run=run,
     )
 
 
@@ -385,40 +389,36 @@ def experiment_compare_rules(
     ctx: typer.Context,
     project_id: str,
     rule_id: list[str] = typer.Option(..., "--rule"),
-    executor: ExecutorKind = typer.Option(ExecutorKind.EXTERNAL, "--executor"),
-    provider_profile_id: str | None = typer.Option(None, "--provider"),
-    prompt_revision_id: str | None = typer.Option(None, "--prompt"),
-    run: bool = typer.Option(False, "--run"),
+    provider_profile_id: str = typer.Option(..., "--provider"),
 ) -> None:
     service = _service(ctx)
-    experiment_id = service.start_rule_comparison(
+    experiment_id = service.experiments.start_rule_comparison(
         project_id,
-        executor=executor,
         rule_ids=rule_id,
         provider_profile_id=provider_profile_id,
-        prompt_revision_id=prompt_revision_id,
     )
-    if run:
-        if executor is not ExecutorKind.API:
-            raise typer.BadParameter("--run 仅适用于 API 执行器")
-        asyncio.run(service.run_api_jobs(project_id))
-    _emit({"experiment_id": experiment_id})
+    asyncio.run(service.jobs.run_api_jobs(project_id))
+    _emit({"experiment_id": experiment_id, "executor": ExecutorKind.API.value})
 
 
 @experiment_app.command("show")
 def experiment_show(ctx: typer.Context, experiment_id: str) -> None:
-    _emit(_service(ctx).experiment_detail(experiment_id))
+    _emit(_service(ctx).result_queries.experiment_detail(experiment_id))
 
 
 @result_app.command("list")
 def result_list(ctx: typer.Context, project_id: str) -> None:
-    _emit(_service(ctx).list_results(project_id))
+    _emit(_service(ctx).result_queries.list(project_id))
 
 
-@result_app.command("select")
-def result_select(ctx: typer.Context, generation_id: str) -> None:
-    _service(ctx).results.select(generation_id)
-    _emit({"generation_id": generation_id, "selected": True})
+@result_app.command("review")
+def result_review(
+    ctx: typer.Context,
+    generation_id: str,
+    state: ReviewState = typer.Option(..., "--state"),
+) -> None:
+    row = _service(ctx).results.review(generation_id, state)
+    _emit({"generation_id": generation_id, "review_state": row.review_state})
 
 
 @result_app.command("edit")
@@ -455,7 +455,7 @@ def provider_configure(
     parsed = json.loads(parameters)
     if not isinstance(parsed, dict):
         raise typer.BadParameter("parameters 必须是 JSON 对象")
-    profile_id = _service(ctx).configure_provider(
+    profile_id = _service(ctx).provider_runtime.configure(
         name=name,
         adapter=adapter,
         base_url=base_url,
@@ -477,7 +477,7 @@ def provider_test(
     ctx: typer.Context,
     profile_id: str | None = typer.Option(None, "--provider"),
 ) -> None:
-    _emit(asyncio.run(_service(ctx).test_provider(profile_id)))
+    _emit(asyncio.run(_service(ctx).provider_runtime.test(profile_id)))
 
 
 @provider_app.command("activate")
@@ -492,36 +492,32 @@ def _start_generation_command(
     executor: ExecutorKind,
     rule_id: str | None,
     provider_profile_id: str | None,
-    prompt_revision_id: str | None,
     batch_five: bool,
-    run: bool,
 ) -> None:
     service = _service(ctx)
-    experiment_id = service.start_generation(
+    experiment_id = service.experiments.start_generation(
         project_id,
         executor=executor,
         rule_id=rule_id,
         batch_five=batch_five,
         provider_profile_id=provider_profile_id,
-        prompt_revision_id=prompt_revision_id,
     )
-    if run:
-        if executor is not ExecutorKind.API:
-            raise typer.BadParameter("--run 仅适用于 API 执行器")
-        asyncio.run(service.run_api_jobs(project_id))
+    if executor is ExecutorKind.API:
+        asyncio.run(service.jobs.run_api_jobs(project_id))
     _emit({"experiment_id": experiment_id})
 
 
 def _service(ctx: typer.Context) -> InkFlowService:
-    return ctx.obj["service"]
+    service = ctx.obj.get("service")
+    if service is None:
+        paths: AppPaths = ctx.obj["paths"]
+        service = InkFlowService(Database(paths.database_path))
+        ctx.obj["service"] = service
+    return service
 
 
-def _prompt_view(service: InkFlowService, row) -> dict[str, Any]:
-    return {
-        **row_dict(row),
-        "entity_path": service.prompts.entity_path(row),
-        "editable_file": service.prompts.editable_file(row),
-    }
+def _prompt_view(prompt) -> dict[str, Any]:
+    return prompt.model_dump(mode="json")
 
 
 def _text_argument(value: str | None, path: Path | None, label: str) -> str:
@@ -536,10 +532,16 @@ def _text_argument(value: str | None, path: Path | None, label: str) -> str:
     raise typer.BadParameter(f"缺少 {label}")
 
 
-def _available_port(host: str) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((host, 0))
-        return int(sock.getsockname()[1])
+def _bind_server_socket(host: str, port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(128)
+        return sock
+    except Exception:
+        sock.close()
+        raise
 
 
 def _emit(value: Any) -> None:

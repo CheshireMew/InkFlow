@@ -16,6 +16,10 @@ venv/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+/.inkflow-result-job-*.json
+/inkflow-generation-*.json
+/inkflow-preparation-result-*.json
+/inkflow-reference-selection-*.json
 
 # Node
 node_modules/
@@ -23,6 +27,8 @@ dist/
 
 # Browser verification runtime profiles
 archive/verification-*/chrome-*/
+/archive/*.db
+/archive/**/inkflow.db
 
 # IDE
 .idea/

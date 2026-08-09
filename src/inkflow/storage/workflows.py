@@ -39,35 +39,58 @@ class ExperimentJobSpec:
     payload: dict[str, Any]
 
 
+class StaleProjectInput(ValueError):
+    pass
+
+
 class WorkflowStore:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def create_job(
+    def create_preparation_job(
         self,
         *,
         project_id: str,
-        kind: JobKind,
         executor: str,
         payload: dict[str, Any],
-        status: JobStatus = JobStatus.PENDING,
-        handoff_id: str | None = None,
-        experiment_id: str | None = None,
-        experiment_arm_id: str | None = None,
+        expected_input_revision: int,
     ) -> JobRow:
         row = self._new_job(
             project_id=project_id,
-            kind=kind,
+            kind=JobKind.PREPARE_MATERIAL,
             executor=executor,
             payload=payload,
-            status=status,
-            handoff_id=handoff_id,
-            experiment_id=experiment_id,
-            experiment_arm_id=experiment_arm_id,
+            status=JobStatus.PENDING,
+            handoff_id=None,
+            experiment_id=None,
+            experiment_arm_id=None,
         )
-        with self.database.transaction() as session:
-            if session.get(ProjectRow, project_id) is None:
+        with self.database.transaction(immediate=True) as session:
+            project = session.get(ProjectRow, project_id)
+            if project is None:
                 raise FileNotFoundError(f"Project not found: {project_id}")
+            if project.input_revision != expected_input_revision:
+                raise StaleProjectInput(
+                    "project input changed before the preparation job was created"
+                )
+            active = session.scalar(
+                select(func.count(JobRow.id)).where(
+                    JobRow.project_id == project_id,
+                    JobRow.kind.in_(
+                        [JobKind.PREPARE_MATERIAL.value, JobKind.SELECT_REFERENCES.value]
+                    ),
+                    JobRow.status.in_(
+                        [
+                            JobStatus.PENDING.value,
+                            JobStatus.LEASED.value,
+                            JobStatus.WAITING.value,
+                            JobStatus.BLOCKED.value,
+                        ]
+                    ),
+                )
+            )
+            if int(active or 0):
+                raise ValueError("project already has an active preparation chain")
             session.add(row)
         return row
 
@@ -165,37 +188,47 @@ class WorkflowStore:
         raw_response: str | None,
         next_payload: dict[str, Any],
     ) -> JobRow:
+        stale = False
+        next_job: JobRow | None = None
         with self.database.transaction() as session:
             job, attempt = self._leased(session, job_id, attempt_id, lease_token)
-            self._succeed(job, attempt, result, raw_response)
-            for item in result.get("discovered_sources", []):
-                content = str(item.get("content") or "").strip()
-                if not content:
-                    continue
-                session.add(
-                    SourceRow(
-                        id=new_id("source"),
-                        project_id=job.project_id,
-                        kind="search",
-                        content=content,
-                        content_hash=stable_hash(content),
-                        provenance_json=dumps(
-                            {key: value for key, value in item.items() if key != "content"}
-                        ),
-                        created_at=now(),
+            payload = loads(job.payload_json, {})
+            stale = not self._input_revision_is_current(session, job, attempt, payload)
+            if not stale:
+                self._succeed(job, attempt, result, raw_response)
+                for item in result.get("discovered_sources", []):
+                    content = str(item["content"])
+                    session.add(
+                        SourceRow(
+                            id=new_id("source"),
+                            project_id=job.project_id,
+                            kind="search",
+                            content=content,
+                            content_hash=stable_hash(content),
+                            provenance_json=dumps(
+                                {
+                                    "title": item["title"],
+                                    "url": item["url"],
+                                    "use": item["use"],
+                                }
+                            ),
+                            created_at=now(),
+                        )
                     )
+                next_job = self._new_job(
+                    project_id=job.project_id,
+                    kind=JobKind.SELECT_REFERENCES,
+                    executor=job.executor,
+                    payload=next_payload,
+                    status=JobStatus.PENDING,
                 )
-            next_job = self._new_job(
-                project_id=job.project_id,
-                kind=JobKind.SELECT_REFERENCES,
-                executor=job.executor,
-                payload=next_payload,
-                status=JobStatus.PENDING,
-            )
-            session.add(next_job)
-            session.flush()
-            session.expunge(next_job)
-            return next_job
+                session.add(next_job)
+                session.flush()
+                session.expunge(next_job)
+        if stale:
+            raise StaleProjectInput("project input changed; preparation was superseded")
+        assert next_job is not None
+        return next_job
 
     def complete_selection(
         self,
@@ -206,35 +239,41 @@ class WorkflowStore:
         result: dict[str, Any],
         raw_response: str | None,
     ) -> HandoffRow:
+        stale = False
+        handoff: HandoffRow | None = None
         with self.database.transaction() as session:
             job, attempt = self._leased(session, job_id, attempt_id, lease_token)
-            case_ids = list(result["case_ids"])
-            hook_ids = list(result["hook_ids"])
-            cases = self._ordered_references(session, case_ids)
-            hooks = self._ordered_references(session, hook_ids)
-            self._validate_reference_kinds(cases, hooks)
             payload = loads(job.payload_json, {})
-            project = session.get(ProjectRow, job.project_id)
-            if project is None:
-                raise FileNotFoundError(f"Project not found: {job.project_id}")
-            core = HandoffCore(
-                user_request=project.user_request,
-                purified_material=payload["purified_material"],
-                reference_cases=[row.body for row in cases],
-                reference_hooks=[row.body for row in hooks],
-                other_inputs=payload.get("other_inputs") or "无",
-            )
-            self._succeed(job, attempt, result, raw_response)
-            handoff = self._insert_handoff(
-                session,
-                project_id=job.project_id,
-                core=core,
-                case_ids=case_ids,
-                hook_ids=hook_ids,
-            )
-            session.flush()
-            session.expunge(handoff)
-            return handoff
+            stale = not self._input_revision_is_current(session, job, attempt, payload)
+            if not stale:
+                case_ids = list(result["case_ids"])
+                hook_ids = list(result["hook_ids"])
+                cases = self._ordered_references(session, case_ids)
+                hooks = self._ordered_references(session, hook_ids)
+                self._validate_reference_kinds(cases, hooks)
+                input_snapshot = payload["project_input"]
+                core = HandoffCore(
+                    user_request=str(input_snapshot["user_request"]),
+                    purified_material=payload["purified_material"],
+                    reference_cases=[row.body for row in cases],
+                    reference_hooks=[row.body for row in hooks],
+                    other_inputs=payload.get("other_inputs") or "无",
+                )
+                self._succeed(job, attempt, result, raw_response)
+                handoff = self._insert_handoff(
+                    session,
+                    project_id=job.project_id,
+                    project_input_revision=int(input_snapshot["revision"]),
+                    core=core,
+                    case_ids=case_ids,
+                    hook_ids=hook_ids,
+                )
+                session.flush()
+                session.expunge(handoff)
+        if stale:
+            raise StaleProjectInput("project input changed; selection was superseded")
+        assert handoff is not None
+        return handoff
 
     def create_handoff_revision(
         self,
@@ -253,6 +292,7 @@ class WorkflowStore:
             handoff = self._insert_handoff(
                 session,
                 project_id=project_id,
+                project_input_revision=project.input_revision,
                 core=core,
                 case_ids=case_ids,
                 hook_ids=hook_ids,
@@ -300,6 +340,12 @@ class WorkflowStore:
             )
             if row is None:
                 raise FileNotFoundError(f"Draft handoff not found for project: {project_id}")
+            project = session.get(ProjectRow, project_id)
+            if project is None:
+                raise FileNotFoundError(f"Project not found: {project_id}")
+            if row.project_input_revision != project.input_revision:
+                row.status = HandoffStatus.SUPERSEDED.value
+                raise ValueError("handoff was built from an older project input revision")
             row.status = HandoffStatus.APPROVED.value
             row.approved_at = now()
             session.flush()
@@ -324,11 +370,10 @@ class WorkflowStore:
         kind: str,
         executor: str,
         provider_profile_id: str | None,
-        prompt_revision_id: str,
         prompt_snapshot: dict[str, Any],
         provider_snapshot: dict[str, Any],
         generation_settings: dict[str, Any],
-        fixed_input_hash: str,
+        input_package_hash: str,
         jobs: list[ExperimentJobSpec],
     ) -> ExperimentRow:
         if not jobs:
@@ -340,16 +385,26 @@ class WorkflowStore:
             kind=kind,
             executor=executor,
             provider_profile_id=provider_profile_id,
-            prompt_revision_id=prompt_revision_id,
             prompt_snapshot_json=dumps(prompt_snapshot),
             provider_snapshot_json=dumps(provider_snapshot),
             generation_settings_json=dumps(generation_settings),
-            fixed_input_hash=fixed_input_hash,
+            input_package_hash=input_package_hash,
             status=ExperimentStatus.RUNNING.value,
             created_at=now(),
             completed_at=None,
         )
         with self.database.transaction() as session:
+            project = session.get(ProjectRow, project_id)
+            handoff = session.get(HandoffRow, handoff_id)
+            if project is None:
+                raise FileNotFoundError(f"Project not found: {project_id}")
+            if handoff is None or handoff.project_id != project_id:
+                raise FileNotFoundError(f"Handoff not found: {handoff_id}")
+            if (
+                handoff.status != HandoffStatus.APPROVED.value
+                or handoff.project_input_revision != project.input_revision
+            ):
+                raise ValueError("experiment requires the approved current project input")
             session.add(experiment)
             session.flush()
             for ordinal, spec in enumerate(jobs):
@@ -411,7 +466,7 @@ class WorkflowStore:
                     prompt_snapshot_json=dumps(payload["prompt_snapshot"]),
                     provider_snapshot_json=dumps(payload.get("provider_snapshot") or {}),
                     generation_settings_json=dumps(payload["generation_settings"]),
-                    selected=False,
+                    review_state="unreviewed",
                     created_at=now(),
                 )
                 for index, content in enumerate(outputs)
@@ -474,6 +529,22 @@ class WorkflowStore:
                 if experiment:
                     experiment.status = ExperimentStatus.FAILED.value
                     experiment.completed_at = now()
+                blocked_jobs = list(
+                    session.scalars(
+                        select(JobRow).where(
+                            JobRow.experiment_id == job.experiment_id,
+                            JobRow.status == JobStatus.WAITING.value,
+                        )
+                    )
+                )
+                for blocked_job in blocked_jobs:
+                    blocked_job.status = JobStatus.BLOCKED.value
+                    if blocked_job.experiment_arm_id:
+                        blocked_arm = session.get(
+                            ExperimentArmRow, blocked_job.experiment_arm_id
+                        )
+                        if blocked_arm:
+                            blocked_arm.status = "blocked"
             session.flush()
             session.expunge(job)
             return job
@@ -508,6 +579,22 @@ class WorkflowStore:
                 if experiment:
                     experiment.status = ExperimentStatus.RUNNING.value
                     experiment.completed_at = None
+                blocked_jobs = list(
+                    session.scalars(
+                        select(JobRow).where(
+                            JobRow.experiment_id == job.experiment_id,
+                            JobRow.status == JobStatus.BLOCKED.value,
+                        )
+                    )
+                )
+                for blocked_job in blocked_jobs:
+                    blocked_job.status = JobStatus.WAITING.value
+                    if blocked_job.experiment_arm_id:
+                        blocked_arm = session.get(
+                            ExperimentArmRow, blocked_job.experiment_arm_id
+                        )
+                        if blocked_arm:
+                            blocked_arm.status = "waiting"
             session.flush()
             session.expunge(job)
             return job
@@ -533,6 +620,36 @@ class WorkflowStore:
                 session.expunge(row)
             return rows
 
+    def project_activity(self, project_id: str) -> dict[str, Any]:
+        with self.database.session() as session:
+            if session.get(ProjectRow, project_id) is None:
+                raise FileNotFoundError(f"Project not found: {project_id}")
+            jobs = list(
+                session.execute(
+                    select(JobRow.id, JobRow.status)
+                    .where(JobRow.project_id == project_id)
+                    .order_by(JobRow.created_at, JobRow.id)
+                )
+            )
+            experiments = list(
+                session.execute(
+                    select(ExperimentRow.id, ExperimentRow.status)
+                    .where(ExperimentRow.project_id == project_id)
+                    .order_by(ExperimentRow.created_at, ExperimentRow.id)
+                )
+            )
+        state = {
+            "jobs": [[job_id, status] for job_id, status in jobs],
+            "experiments": [
+                [experiment_id, status] for experiment_id, status in experiments
+            ],
+        }
+        active = any(
+            status in {JobStatus.PENDING.value, JobStatus.LEASED.value}
+            for _job_id, status in jobs
+        )
+        return {"active": active, "state_token": stable_hash(state)}
+
     def list_experiment_arms(self, experiment_id: str) -> list[ExperimentArmRow]:
         with self.database.session() as session:
             rows = list(
@@ -551,6 +668,7 @@ class WorkflowStore:
         session: Session,
         *,
         project_id: str,
+        project_input_revision: int,
         core: HandoffCore,
         case_ids: list[str],
         hook_ids: list[str],
@@ -572,6 +690,7 @@ class WorkflowStore:
             id=new_id("handoff"),
             project_id=project_id,
             revision=int(revision or 0) + 1,
+            project_input_revision=project_input_revision,
             status=HandoffStatus.DRAFT.value,
             user_request=core.user_request,
             purified_material=core.purified_material,
@@ -589,6 +708,23 @@ class WorkflowStore:
             update(ProjectRow).where(ProjectRow.id == project_id).values(updated_at=now())
         )
         return row
+
+    @staticmethod
+    def _input_revision_is_current(
+        session: Session,
+        job: JobRow,
+        attempt: JobAttemptRow,
+        payload: dict[str, Any],
+    ) -> bool:
+        project = session.get(ProjectRow, job.project_id)
+        expected = int((payload.get("project_input") or {}).get("revision") or 0)
+        if project is not None and expected > 0 and project.input_revision == expected:
+            return True
+        job.status = JobStatus.SUPERSEDED.value
+        attempt.status = JobStatus.SUPERSEDED.value
+        attempt.error = "project input changed while this attempt was active"
+        attempt.completed_at = now()
+        return False
 
     @staticmethod
     def _ordered_references(session: Session, ids: list[str]) -> list[ReferenceRow]:
